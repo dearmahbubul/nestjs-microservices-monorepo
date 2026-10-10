@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  /* Served under /admin by the nginx reverse proxy (docker/nginx/nginx.conf). */
+  basePath: "/admin",
   experimental: {
     agentFeedback: true,
   },
