@@ -3,3 +3,7 @@ packages:
   - "packages/*"
 allowBuilds:
   unrs-resolver: true
+  # argon2 is a native addon: its install script fetches/builds the binary.
+  # pnpm blocks build scripts by default, so it must be allowed explicitly or
+  # the module resolves but throws at require() time.
+  argon2: true
