@@ -32,6 +32,9 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# ...but the template is meant to be committed — the backend services do the
+# same. Without this, create-next-app's `.env*` rule silently swallows it.
+!.env.example
 
 # vercel
 .vercel
