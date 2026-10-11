@@ -40,7 +40,7 @@ COPY --from=pruner /app/out/json/ .
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 COPY --from=pruner /app/out/full/ .
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN pnpm --filter ${APP} build
+RUN pnpm turbo run build --filter=${APP}
 
 # ------------------------------------------------------------------ runner
 # Slim production image running "next start" as a non-root user.

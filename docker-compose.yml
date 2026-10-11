@@ -29,6 +29,14 @@ x-service: &service
     DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-app}
     REDIS_URL: redis://redis:6379
     RABBITMQ_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:-app}@rabbitmq:5672
+  # Every NestJS service exposes GET /health; probe it with the bundled Node runtime.
+  # Services that listen on a non-default port override HEALTHCHECK_PORT.
+  healthcheck:
+    test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:'+(process.env.HEALTHCHECK_PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+    interval: 15s
+    timeout: 5s
+    retries: 5
+    start_period: 20s
 
 # Shared settings for the Next.js frontends.
 x-web: &web
@@ -78,9 +86,13 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-app}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-app}
+    # Publishing the broker to the host is for local tooling only: the services
+    # reach it over the compose network at rabbitmq:5672 and do not need this.
+    # Overridable so a machine that already has 5672/15672 bound by another
+    # project can move them instead of failing to start networking.
     ports:
-      - "5672:5672"
-      - "15672:15672" # management UI -> http://localhost:15672
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MGMT_PORT:-15672}:15672" # management UI -> http://localhost:${RABBITMQ_MGMT_PORT:-15672}
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
     healthcheck:
@@ -97,20 +109,39 @@ services:
     build:
       context: .
       dockerfile: apps/api-gateway/Dockerfile
+    # The gateway is the public HTTP surface and listens on 4000 internally
+    # (see apps/api-gateway/.env.example), so it does not collide with the
+    # internal services all binding 3000 on the shared network.
+    environment:
+      <<: *service-env
+      PORT: 4000
+      HEALTHCHECK_PORT: 4000
+      # Where to forward each route prefix. These must be the compose service
+      # names: the gateway's own fallbacks are localhost:3000, which inside this
+      # container is the gateway itself, so every proxied call would 503.
+      CATALOG_SERVICE_URL: http://catalog-service:3000
+      IDENTITY_SERVICE_URL: http://identity-service:3000
+      ORDERS_SERVICE_URL: http://orders-service:3000
+      NOTIFICATIONS_SERVICE_URL: http://notifications-service:3000
+      # Verifies session tokens on protected routes; must match the value
+      # identity-service signs with, or every write will 401.
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-dev-only-insecure-jwt-secret-change-me}
     ports:
-      - "3000:3000" # public entry point (also proxied by nginx at /api)
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
+      - "4000:4000" # public entry point (also proxied by nginx at /api)
 
   catalog-service:
     <<: *service
     build:
       context: .
       dockerfile: apps/catalog-service/Dockerfile
+    environment:
+      <<: *service-env
+      # MESSAGING_QUEUE is the private reply queue only. Domain events arrive
+      # via a separate connection bound to the shared fanout exchange
+      # (MESSAGING_EXCHANGE); its queue is code-defined, not set here, so the
+      # two roles can never collapse onto the same queue.
+      MESSAGING_QUEUE: catalog.replies
+      MESSAGING_EXCHANGE: orders.events
     expose: ["3000"]
 
   identity-service:
@@ -118,6 +149,15 @@ services:
     build:
       context: .
       dockerfile: apps/identity-service/Dockerfile
+    environment:
+      <<: *service-env
+      # Signs the session tokens the gateway verifies. Required in production:
+      # the service refuses to boot without it (see its loadConfiguration()).
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-dev-only-insecure-jwt-secret-change-me}
+      # Seeds the admin account on first boot. AUTH_ADMIN_PASSWORD is likewise
+      # required in production. Change both before exposing this stack.
+      AUTH_ADMIN_EMAIL: ${AUTH_ADMIN_EMAIL:-admin@example.com}
+      AUTH_ADMIN_PASSWORD: ${AUTH_ADMIN_PASSWORD:-admin12345}
     expose: ["3000"]
 
   notifications-service:
@@ -125,6 +165,10 @@ services:
     build:
       context: .
       dockerfile: apps/notifications-service/Dockerfile
+    environment:
+      <<: *service-env
+      MESSAGING_QUEUE: notifications.replies
+      MESSAGING_EXCHANGE: orders.events
     expose: ["3000"]
 
   orders-service:
@@ -132,6 +176,12 @@ services:
     build:
       context: .
       dockerfile: apps/orders-service/Dockerfile
+    environment:
+      <<: *service-env
+      # Private reply queue; events are published to the fanout exchange by a
+      # separate client connection.
+      MESSAGING_QUEUE: orders.outbox
+      MESSAGING_EXCHANGE: orders.events
     expose: ["3000"]
 
   # ---------------------------------------------------------------- frontends
@@ -147,6 +197,13 @@ services:
     build:
       context: .
       dockerfile: apps/admin/Dockerfile
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # The admin app talks to the gateway from its own server-side route
+      # handlers (see apps/admin/app/lib/gateway.ts), never from the browser —
+      # so this is an in-network address, not a NEXT_PUBLIC_ one.
+      API_GATEWAY_URL: http://api-gateway:4000
     expose: ["3000"]
 
   # ---------------------------------------------------------------- web server / reverse proxy

@@ -39,7 +39,7 @@ ARG APP
 COPY --from=pruner /app/out/json/ .
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 COPY --from=pruner /app/out/full/ .
-RUN pnpm --filter ${APP} build
+RUN pnpm turbo run build --filter=${APP}
 
 # ------------------------------------------------------------------ runner
 # Slim production image: built output + runtime deps only, running as non-root.
