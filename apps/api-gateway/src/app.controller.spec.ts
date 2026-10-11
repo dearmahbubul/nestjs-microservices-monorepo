@@ -15,8 +15,16 @@ describe('AppController', () => {
   });
 
   describe('root', () => {
-    it('should return "Hello World!"', () => {
-      expect(appController.getHello()).toBe('Hello World!');
+    it('advertises the gateway routing table', () => {
+      const info = appController.getInfo();
+
+      expect(info.service).toBe('api-gateway');
+      expect(info.routes).toEqual(
+        expect.arrayContaining([
+          { path: '/api/products', service: 'catalog' },
+          { path: '/api/orders', service: 'orders' },
+        ]),
+      );
     });
   });
 });

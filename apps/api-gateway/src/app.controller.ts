@@ -5,8 +5,9 @@ import { AppService } from './app.service.js';
 export class AppController {
   constructor(private readonly appService: AppService) {}
 
+  /** Service discovery for humans: what this gateway fronts. */
   @Get()
-  getHello(): string {
-    return this.appService.getHello();
+  getInfo() {
+    return this.appService.getInfo();
   }
 }
