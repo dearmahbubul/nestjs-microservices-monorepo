@@ -40,6 +40,15 @@ COPY --from=pruner /app/out/json/ .
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 COPY --from=pruner /app/out/full/ .
 ENV NEXT_TELEMETRY_DISABLED=1
+# NEXT_PUBLIC_* are inlined into the client bundle at build time, so they are
+# build args, not runtime env: setting them only on the container would leave
+# the browser calling whatever the defaults compiled in. Both are relative
+# because the browser talks to nginx, which serves the app and the API on one
+# origin. See docker-compose.yml for the same values at runtime.
+ARG NEXT_PUBLIC_API_URL=/api
+ARG NEXT_PUBLIC_APP_BASE=/api/storefront
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV NEXT_PUBLIC_APP_BASE=${NEXT_PUBLIC_APP_BASE}
 RUN pnpm turbo run build --filter=${APP}
 
 # ------------------------------------------------------------------ runner

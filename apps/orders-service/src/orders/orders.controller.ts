@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { OrdersService } from './orders.service.js';
 import type { CreateOrderDto } from './dto/create-order.dto.js';
 
@@ -11,9 +11,15 @@ export class OrdersController {
     return this.orders.create(dto);
   }
 
+  /**
+   * The gateway sets `customerEmail` from the session token before forwarding,
+   * and deletes whatever the client asked for. Reading it off the query is
+   * therefore safe *here* only because the only way in is through that proxy;
+   * see `OrdersService.findAll`.
+   */
   @Get()
-  findAll() {
-    return this.orders.findAll();
+  findAll(@Query('customerEmail') customerEmail?: string) {
+    return this.orders.findAll(customerEmail);
   }
 
   @Get(':id')

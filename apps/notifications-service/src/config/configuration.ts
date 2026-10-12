@@ -1,3 +1,4 @@
+import { toInt } from '@repo/config';
 import {
   messagingConfiguration,
   type MessagingConfig,
@@ -8,26 +9,11 @@ export interface AppConfig {
     env: string;
     port: number;
   };
-  messaging: MessagingConfig;
   /**
-   * Fanout config for consuming domain events. Binds this service's own queue
-   * to the shared exchange so it receives every `order.created`.
+   * Event-bus config. Binds this service's own queue to the shared exchange,
+   * so it receives every `order.created`.
    */
-  eventBus: MessagingConfig;
-}
-
-function toInt(name: string, fallback: number, min = 0): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw === '') {
-    return fallback;
-  }
-  const value = Number.parseInt(raw, 10);
-  if (Number.isNaN(value) || value < min) {
-    throw new Error(
-      `Invalid ${name}: expected an integer >= ${min}, got '${raw}'`,
-    );
-  }
-  return value;
+  messaging: MessagingConfig;
 }
 
 export default function loadConfiguration(): AppConfig {
@@ -38,9 +24,7 @@ export default function loadConfiguration(): AppConfig {
       env,
       port: toInt('PORT', 3000),
     },
-    messaging: messagingConfiguration({ queue: 'notifications.replies' }),
-    eventBus: messagingConfiguration({
-      mode: 'fanout',
+    messaging: messagingConfiguration({
       exchange: 'orders.events',
       queue: 'notifications.order-events',
     }),

@@ -7,47 +7,27 @@ import {
 import type { MessagingConfig } from './messaging.config.js';
 
 /**
- * RMQ options shared by clients and servers.
+ * RMQ options for the shared fanout event exchange.
  *
- * The Nest RMQ transport has a sharp edge worth stating once: without an
- * exchange, `emit` publishes straight to the connection's own `queue`
- * (`sendToQueue`), so an event reaches exactly one queue. Two consumers on two
- * queues means the second one silently never fires — no error, just a message
- * nobody reads.
- *
- * `mode: 'fanout'` fixes that by routing through one exchange every
- * subscriber binds to. The routing key is ignored by a fanout exchange, and
- * both `ClientRMQ` and `ServerRMQ` name the exchange `exchange ?? queue`, so
- * *every* participant must set the same explicit `exchange`. That is exactly
- * what `MessagingConfig.exchange` is for.
+ * Events are published to one exchange that every subscriber binds its own
+ * queue to, so a single event reaches all of them. Publishing straight to a
+ * queue would deliver to one consumer only, so a second service would silently
+ * never receive it. A fanout exchange ignores the routing key; Nest names the
+ * exchange `exchange ?? queue`, so every participant sets the same explicit
+ * `exchange`.
  */
 function rmqOptions(config: MessagingConfig) {
-  const fanout = config.mode === 'fanout';
   return {
     urls: [config.url],
     queue: config.queue,
     prefetchCount: config.prefetchCount,
     queueOptions: { durable: config.queueDurable },
-    ...(fanout
-      ? {
-          exchange: config.exchange,
-          exchangeType: 'fanout' as const,
-        }
-      : {}),
+    exchange: config.exchange,
+    exchangeType: 'fanout' as const,
   };
 }
 
 export function toClientOptions(config: MessagingConfig): ClientOptions {
-  if (config.transport === 'tcp') {
-    return {
-      transport: Transport.TCP,
-      options: {
-        host: config.host,
-        port: config.port,
-      },
-    };
-  }
-
   return {
     transport: Transport.RMQ,
     options: {
@@ -58,41 +38,16 @@ export function toClientOptions(config: MessagingConfig): ClientOptions {
 }
 
 export function toServerOptions(config: MessagingConfig): MicroserviceOptions {
-  if (config.transport === 'tcp') {
-    return {
-      transport: Transport.TCP,
-      options: {
-        host: config.host,
-        port: config.port,
-        retryAttempts: config.retryAttempts,
-        retryDelay: config.retryDelayMs,
-      },
-    };
-  }
-
   return {
     transport: Transport.RMQ,
     options: {
       ...rmqOptions(config),
-      // Acking depends on what the connection carries:
-      //
-      //  - 'fanout' means this connection exists purely to receive domain
-      //    events, which are always sent with `emit` and therefore have no
-      //    `id`. The Nest RMQ server returns from `handleMessage` before the
-      //    `channel.ack()` path whenever a message has no `id`, so events are
-      //    never acknowledged. With `noAck: false` that is fatal rather than
-      //    untidy: every event holds a prefetch slot for the life of the
-      //    channel, so after `prefetchCount` events the consumer goes deaf.
-      //    The first event is handled and everything after it is silently
-      //    ignored, which is exactly the failure that survives casual testing.
-      //    Fire-and-forget messages must use `noAck: true` — there is no ack
-      //    to withhold. A consumer that crashes mid-handling loses that one
-      //    event; that is the accepted trade for not stalling the bus.
-      //
-      //  - 'queue' is the request/response connection. Those messages carry an
-      //    `id` and *are* acked by the server, so the slot is released and a
-      //    slow consumer cannot wedge the queue.
-      noAck: config.mode === 'fanout',
+      // Events are sent with `emit` and carry no `id`, and the Nest RMQ server
+      // only acks messages that have one. With acks on, every event would hold
+      // a prefetch slot for the life of the channel, and the consumer would go
+      // deaf after `prefetchCount` messages. Fire-and-forget has no ack to
+      // withhold; a crash mid-handler loses that one event by design.
+      noAck: true,
     },
   } satisfies RmqOptions;
 }

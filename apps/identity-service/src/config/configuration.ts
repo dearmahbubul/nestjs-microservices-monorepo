@@ -1,3 +1,5 @@
+import { toBool, toInt } from '@repo/config';
+
 /**
  * Fail-fast configuration, mirroring the `toInt`/`toBool` style the other
  * services use. A misconfigured secret or a bad port should stop the process at
@@ -29,31 +31,6 @@ const DEV_JWT_SECRET = 'dev-only-insecure-jwt-secret-change-me';
 
 /** Minimum length we will accept for a real secret. */
 const MIN_SECRET_LENGTH = 16;
-
-function toInt(name: string, fallback: number, min = 0): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw === '') {
-    return fallback;
-  }
-  const value = Number.parseInt(raw, 10);
-  if (Number.isNaN(value) || value < min) {
-    throw new Error(
-      `Invalid ${name}: expected an integer >= ${min}, got '${raw}'`,
-    );
-  }
-  return value;
-}
-
-function toBool(name: string, fallback: boolean): boolean {
-  const raw = process.env[name];
-  if (raw === undefined || raw === '') {
-    return fallback;
-  }
-  if (raw !== 'true' && raw !== 'false') {
-    throw new Error(`Invalid ${name}: expected 'true' or 'false', got '${raw}'`);
-  }
-  return raw === 'true';
-}
 
 function jwtSecret(env: string): string {
   const value = process.env.AUTH_JWT_SECRET;
@@ -96,7 +73,10 @@ export default function loadConfiguration(): AppConfig {
     },
     database: {
       url: process.env.DATABASE_URL ?? 'postgresql://app:app@localhost:5432/app',
-      synchronize: env !== 'production',
+      // Tables are created with synchronize outside production. There are no
+      // migrations, so a production stack must opt in explicitly (the demo
+      // compose stack sets DATABASE_SYNCHRONIZE=true) or no tables are created.
+      synchronize: toBool('DATABASE_SYNCHRONIZE', env !== 'production'),
     },
     auth: {
       jwtSecret: jwtSecret(env),

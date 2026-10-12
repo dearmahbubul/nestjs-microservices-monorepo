@@ -4,44 +4,28 @@ import { ClientProxy, ClientProxyFactory } from '@nestjs/microservices';
 import type { MessagingConfig } from './messaging.config.js';
 import { MessagingService } from './messaging.service.js';
 import { toClientOptions } from './messaging.options.js';
-import { EVENT_BUS_CLIENT, MESSAGING_CLIENT } from './messaging.tokens.js';
+import { MESSAGING_CLIENT } from './messaging.tokens.js';
 
 /**
- * Provides a `ClientProxy` for a named config key, or `null` when the service
- * does not register one. Null (rather than a throw) is what lets every service
- * import this module while only publishers pay for an event bus.
+ * Provides the event-bus `ClientProxy` (for publishers) and the shared
+ * `MessagingService` (publishing + health). The client is `null` when a service
+ * registers no `messaging` config, so the module can be imported anywhere.
  */
-function clientFactory(configKey: string) {
-  return (config: ConfigService): ClientProxy | null => {
-    const messaging = config.get<MessagingConfig>(configKey);
-    if (!messaging) {
-      return null;
-    }
-    return ClientProxyFactory.create(toClientOptions(messaging));
-  };
-}
-
 @Global()
 @Module({
   providers: [
     {
       provide: MESSAGING_CLIENT,
-      useFactory: (config: ConfigService): ClientProxy => {
-        const client = clientFactory('messaging')(config);
-        if (!client) {
-          throw new Error(`'messaging' config is not registered`);
-        }
-        return client;
+      useFactory: (config: ConfigService): ClientProxy | null => {
+        const messaging = config.get<MessagingConfig>('messaging');
+        return messaging
+          ? ClientProxyFactory.create(toClientOptions(messaging))
+          : null;
       },
-      inject: [ConfigService],
-    },
-    {
-      provide: EVENT_BUS_CLIENT,
-      useFactory: clientFactory('eventBus'),
       inject: [ConfigService],
     },
     MessagingService,
   ],
-  exports: [MESSAGING_CLIENT, EVENT_BUS_CLIENT, MessagingService],
+  exports: [MESSAGING_CLIENT, MessagingService],
 })
 export class MessagingModule {}

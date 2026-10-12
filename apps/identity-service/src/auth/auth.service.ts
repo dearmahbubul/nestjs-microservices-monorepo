@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   UnauthorizedException,
@@ -12,9 +13,20 @@ import * as argon2 from 'argon2';
 import type { AuthUser, LoginResponse, TokenClaims } from '@repo/contracts';
 import { User } from '../database/user.entity.js';
 import type { AppConfig } from '../config/configuration.js';
+import type { RegisterDto } from './dto/register.dto.js';
 
 /** Argon2id parameters. `type` is explicit so a future default change can't move us. */
 const HASH_OPTIONS = { type: argon2.argon2id } as const;
+
+/** Shortest password we will store. Length is the only rule — the rest is theatre. */
+const MIN_PASSWORD_LENGTH = 8;
+
+/**
+ * Deliberately permissive: one `@`, a dot in the domain, nothing else. Anything
+ * stricter rejects real addresses, and the only thing an email has to survive
+ * here is a round trip to the confirmation email.
+ */
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /** Emails are compared case-insensitively; the column stores the normal form. */
 export function normalizeEmail(email: string): string {
@@ -78,13 +90,72 @@ export class AuthService {
       throw new UnauthorizedException('Invalid email or password');
     }
 
-    const token = await this.jwt.signAsync(
-      { sub: user.id, email: user.email, role: user.role },
-      { expiresIn: this.ttlSeconds },
-    );
+    const token = await this.issueToken(user);
 
     this.logger.log(`Issued a token for ${user.email}`);
     return { token, user: toAuthUser(user) };
+  }
+
+  /**
+   * Creates a `customer` account and signs it in.
+   *
+   * The role is hard-coded. There is no path through this method that produces
+   * an admin — the seeded account is the only one, and a caller-supplied role
+   * would be privilege escalation with extra steps.
+   *
+   * Unlike `login`, an address that is already taken is reported as such. That
+   * is a deliberate reversal of the enumeration defence: the caller is choosing
+   * an email, and "already registered, sign in instead" is the only answer that
+   * lets them finish. Login keeps the uniform error, because there the attacker
+   * has nothing to guess against but an existing account.
+   */
+  async register(dto: RegisterDto): Promise<LoginResponse> {
+    const email = this.validatedEmail(dto?.email);
+    const password = this.validatedPassword(dto?.password);
+
+    // Take the hash *before* the existence check so a duplicate and a fresh
+    // address cost roughly the same, rather than registering being visibly
+    // faster than colliding.
+    const passwordHash = await argon2.hash(password, HASH_OPTIONS);
+
+    try {
+      // One insert, and the unique index on `email` decides: checking first and
+      // then inserting would let two concurrent signups both pass the check.
+      const user = await this.users.save(
+        this.users.create({ email, passwordHash, role: 'customer' }),
+      );
+      this.logger.log(`Registered customer ${user.email}`);
+      return { token: await this.issueToken(user), user: toAuthUser(user) };
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new ConflictException('That email is already registered');
+      }
+      throw error;
+    }
+  }
+
+  /** The single place a token is minted, so claims cannot drift between flows. */
+  private issueToken(user: User): Promise<string> {
+    return this.jwt.signAsync(
+      { sub: user.id, email: user.email, role: user.role },
+      { expiresIn: this.ttlSeconds },
+    );
+  }
+
+  private validatedEmail(value: unknown): string {
+    if (typeof value !== 'string' || !EMAIL_PATTERN.test(value.trim())) {
+      throw new BadRequestException('a valid email is required');
+    }
+    return normalizeEmail(value);
+  }
+
+  private validatedPassword(value: unknown): string {
+    if (typeof value !== 'string' || value.length < MIN_PASSWORD_LENGTH) {
+      throw new BadRequestException(
+        `password must be at least ${MIN_PASSWORD_LENGTH} characters`,
+      );
+    }
+    return value;
   }
 
   /**
@@ -166,4 +237,30 @@ export class AuthService {
     this.decoyHash ??= await argon2.hash('decoy-password', HASH_OPTIONS);
     await argon2.verify(this.decoyHash, password).catch(() => false);
   }
+}
+
+/**
+ * Did this insert collide with the unique index on `email`?
+ *
+ * Checked structurally rather than by `instanceof`: the driver's error class is
+ * not exported in a way worth importing, and this has to keep working if the
+ * demo stack is pointed at a different database. Postgres reports `23505`;
+ * SQLite reports `SQLITE_CONSTRAINT_UNIQUE` in the message.
+ */
+function isUniqueViolation(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+  const { code, driverError, message } = error as {
+    code?: unknown;
+    driverError?: { code?: unknown };
+    message?: unknown;
+  };
+  const codes = [code, driverError?.code];
+  if (codes.includes('23505')) {
+    return true;
+  }
+  return (
+    typeof message === 'string' && message.includes('SQLITE_CONSTRAINT_UNIQUE')
+  );
 }

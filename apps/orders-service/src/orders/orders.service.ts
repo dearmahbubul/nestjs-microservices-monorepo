@@ -35,8 +35,26 @@ export class OrdersService {
     private readonly events: OrderEventsPublisher,
   ) {}
 
-  findAll(): Promise<Order[]> {
-    return this.orders.find({ order: { createdAt: 'DESC' } });
+  /**
+   * All orders, or just one customer's when `customerEmail` is supplied.
+   *
+   * The caller decides which — see the gateway's `applyIdentityScope`, which
+   * overwrites `customerEmail` on the way in with the email from the verified
+   * token. This service does not authenticate anybody, so it must not be the
+   * one deciding whose orders these are: a `customerEmail` that reached it
+   * unvetted would be a filter an attacker chooses, and the answer would be
+   * somebody else's order history.
+   *
+   * An empty filter is treated as "no filter" rather than "no orders": the
+   * gateway injects a non-empty email or nothing at all, so an empty string
+   * means a caller sent `?customerEmail=` to a route that was never scoped.
+   */
+  findAll(customerEmail?: string): Promise<Order[]> {
+    const email = customerEmail?.trim();
+    return this.orders.find({
+      ...(email ? { where: { customerEmail: email } } : {}),
+      order: { createdAt: 'DESC' },
+    });
   }
 
   async findOne(id: string): Promise<Order> {

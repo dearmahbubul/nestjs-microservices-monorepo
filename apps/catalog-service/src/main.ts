@@ -10,15 +10,10 @@ async function bootstrap() {
   const config = app.get(ConfigService);
   const appConfig = config.getOrThrow<AppConfig['app']>('app');
   const messaging = config.getOrThrow<AppConfig['messaging']>('messaging');
-  const eventBus = config.getOrThrow<AppConfig['eventBus']>('eventBus');
 
-  // Two server connections, deliberately:
-  //  - `messaging` is the private queue for the commands this service serves
-  //    (products.findAll / products.reserve).
-  //  - `eventBus` binds this service's own queue to the shared fanout exchange
-  //    so order events reach it alongside every other subscriber.
+  // Consume domain events: this service's own queue bound to the shared
+  // fanout exchange (see MessagingConfig in the service config).
   app.connectMicroservice(toServerOptions(messaging));
-  app.connectMicroservice(toServerOptions(eventBus));
   await app.startAllMicroservices();
 
   await app.listen(appConfig.port);

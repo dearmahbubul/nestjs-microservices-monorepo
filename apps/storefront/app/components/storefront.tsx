@@ -1,55 +1,80 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import {
   createOrder,
+  fetchSession,
   formatCents,
-  listProducts,
   toCents,
+  type AuthUser,
   type Order,
   type Product,
 } from "../lib/api";
+import { useCatalog } from "../lib/use-catalog";
+import { useInView } from "../lib/use-in-view";
 
 /** productId -> quantity. A missing key means "not in the cart". */
 type Cart = Record<string, number>;
 
-const DEFAULT_EMAIL = "mahbubul@example.com";
-
 export default function Storefront() {
-  const [products, setProducts] = useState<Product[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [listError, setListError] = useState<string | null>(null);
-  /** Bumped to re-read the catalog: first mount, manual refresh, after an order. */
-  const [reloadKey, setReloadKey] = useState(0);
+  const catalog = useCatalog();
+  const { products, total, loading, done, error, loadMore, reload, generation } =
+    catalog;
 
   const [cart, setCart] = useState<Cart>({});
-  const [email, setEmail] = useState(DEFAULT_EMAIL);
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [sessionChecked, setSessionChecked] = useState(false);
   const [placing, setPlacing] = useState(false);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [order, setOrder] = useState<Order | null>(null);
 
-  // Every state update happens inside the async continuation, never
-  // synchronously in the effect body — otherwise the React Compiler's
-  // `set-state-in-effect` rule (Next 16) flags a cascading render.
+  /**
+   * Checkout needs an identity, and the only trustworthy one is the session.
+   *
+   * `null` here means "signed out", which is the ordinary case for a shop — a
+   * catalogue does not require an account. It is recorded separately from the
+   * fetch having settled so the cart does not flash "please sign in" during the
+   * first render, before the session answer has arrived.
+   */
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const data = await listProducts();
-        if (cancelled) return;
-        setProducts(data);
-        setListError(null);
-      } catch (error) {
-        if (cancelled) return;
-        setListError(messageOf(error));
+        const session = await fetchSession();
+        if (!cancelled) {
+          setUser(session);
+        }
+      } catch {
+        // A failed session probe is indistinguishable from "signed out" for the
+        // user's purposes, and checkout will say so plainly if they try.
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setSessionChecked(true);
+        }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [reloadKey]);
+  }, []);
+
+  /**
+   * The autoload trigger.
+   *
+   * Keyed on the number of products already loaded, so each page arms a fresh
+   * observer below the content it just added. `generation` folds in the reload
+   * counter, so a manual refresh re-arms a sentinel that had already fired.
+   */
+  const [sentinelRef, sentinelVisible] = useInView(
+    `${generation}:${products.length}`,
+  );
+
+  useEffect(() => {
+    if (sentinelVisible && !done) {
+      loadMore();
+    }
+  }, [sentinelVisible, done, loadMore]);
 
   /** Cart joined against the live catalog, so prices/stock are always current. */
   const lines = useMemo(
@@ -90,9 +115,9 @@ export default function Storefront() {
     });
   }
 
-  function reload() {
-    setLoading(true);
-    setReloadKey((key) => key + 1);
+  function reloadCatalog() {
+    setOrder(null);
+    reload();
   }
 
   async function onCheckout(event: React.FormEvent<HTMLFormElement>) {
@@ -103,16 +128,16 @@ export default function Storefront() {
       setCheckoutError("Your cart is empty — add a product first.");
       return;
     }
-    const customerEmail = email.trim();
-    if (!customerEmail.includes("@")) {
-      setCheckoutError("Enter a valid email address.");
+    if (!user) {
+      setCheckoutError("Please sign in to place an order.");
       return;
     }
 
     setPlacing(true);
     try {
+      // No email is sent: the gateway takes it from the session token, so the
+      // order can only ever land in the signed-in customer's own history.
       const created = await createOrder({
-        customerEmail,
         items: lines.map(({ product, quantity }) => ({
           productId: product.id,
           name: product.name,
@@ -123,14 +148,23 @@ export default function Storefront() {
       setOrder(created);
       setCart({});
       // Stock is reserved asynchronously by catalog-service off the
-      // `order.created` event, so re-read the catalog after a beat.
-      setTimeout(() => setReloadKey((key) => key + 1), 1200);
-    } catch (error) {
-      setCheckoutError(messageOf(error));
+      // `order.created` event, so re-read the catalog after a beat. A full
+      // reload rather than a patched list: the reservation is all-or-nothing
+      // and we do not know here whether it succeeded.
+      setTimeout(reload, 1200);
+    } catch (err) {
+      setCheckoutError(
+        err instanceof Error ? err.message : "Something went wrong.",
+      );
     } finally {
       setPlacing(false);
     }
   }
+
+  const loadedLabel =
+    total === null
+      ? `${products.length} loaded`
+      : `${products.length} of ${total} loaded`;
 
   return (
     <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_22rem]">
@@ -138,14 +172,14 @@ export default function Storefront() {
       <section className="min-w-0">
         <header className="mb-5 flex items-center justify-between gap-4">
           <div>
-            <h2 className="text-lg font-semibold">Catalog</h2>
+            <h2 className="text-lg font-semibold">Products</h2>
             <p className="text-sm text-zinc-500 dark:text-zinc-400">
-              {loading ? "Loading…" : `${products.length} products available`}
+              {loading && products.length === 0 ? "Loading…" : loadedLabel}
             </p>
           </div>
           <button
             type="button"
-            onClick={reload}
+            onClick={reloadCatalog}
             disabled={loading}
             className="rounded-full border border-black/10 px-3 py-1 text-xs font-medium transition-colors hover:bg-black/[.04] disabled:opacity-40 dark:border-white/15 dark:hover:bg-white/[.08]"
           >
@@ -153,12 +187,19 @@ export default function Storefront() {
           </button>
         </header>
 
-        {listError && (
+        {error && (
           <div
             role="alert"
-            className="mb-5 rounded-lg bg-red-500/10 px-4 py-3 text-sm text-red-700 dark:text-red-300"
+            className="mb-5 flex flex-wrap items-center gap-3 rounded-lg bg-red-500/10 px-4 py-3 text-sm text-red-700 dark:text-red-300"
           >
-            Could not load products: {listError}
+            <span>Could not load more products: {error}</span>
+            <button
+              type="button"
+              onClick={loadMore}
+              className="font-medium underline underline-offset-2"
+            >
+              Retry
+            </button>
           </div>
         )}
 
@@ -166,7 +207,7 @@ export default function Storefront() {
           <p className="text-sm text-zinc-500">Loading products…</p>
         )}
 
-        {!loading && products.length === 0 && !listError && (
+        {!loading && products.length === 0 && !error && (
           <p className="rounded-xl border border-dashed border-black/15 px-4 py-12 text-center text-sm text-zinc-500 dark:border-white/15">
             No products yet. An operator can add some in the admin panel.
           </p>
@@ -223,6 +264,24 @@ export default function Storefront() {
             );
           })}
         </ul>
+
+        {/*
+          The autoload sentinel. Always rendered — hiding it when `done` would
+          unmount the node the observer is attached to, and the reveal itself
+          would then be missed. `aria-hidden` keeps a zero-height marker out of
+          the accessibility tree.
+        */}
+        <div ref={sentinelRef} aria-hidden className="h-px w-full" />
+
+        <div className="mt-4 text-center text-sm text-zinc-500 dark:text-zinc-400">
+          {loading && products.length > 0 && <span>Loading more…</span>}
+          {!loading && done && products.length > 0 && (
+            <span>That is the whole catalog.</span>
+          )}
+          {!loading && !done && !error && products.length > 0 && (
+            <span>Scroll for more.</span>
+          )}
+        </div>
       </section>
 
       {/* ---------------------------------------------------------- cart */}
@@ -301,18 +360,41 @@ export default function Storefront() {
             </span>
           </div>
 
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="text-zinc-600 dark:text-zinc-400">
-              Email for the confirmation
-            </span>
-            <input
-              type="email"
-              required
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              className="rounded-lg border border-black/15 bg-transparent px-3 py-2 outline-none focus:border-black/50 dark:border-white/20 dark:focus:border-white/60"
-            />
-          </label>
+          {/*
+            The identity the order will be filed under. It is shown rather than
+            asked for: the gateway stamps the order with the session's email, so
+            an editable field here would only invite a value that gets ignored.
+          */}
+          {sessionChecked && user && (
+            <div className="flex flex-col gap-0.5 text-sm">
+              <span className="text-zinc-600 dark:text-zinc-400">
+                Ordering as
+              </span>
+              <span className="font-medium">{user.email}</span>
+            </div>
+          )}
+
+          {sessionChecked && !user && (
+            <div className="flex flex-col gap-2 rounded-lg border border-black/10 px-4 py-3 text-sm dark:border-white/15">
+              <span className="text-zinc-600 dark:text-zinc-400">
+                Sign in to place an order.
+              </span>
+              <span className="flex gap-3">
+                <Link
+                  href="/login"
+                  className="font-medium underline underline-offset-2"
+                >
+                  Sign in
+                </Link>
+                <Link
+                  href="/register"
+                  className="text-zinc-600 underline underline-offset-2 dark:text-zinc-400"
+                >
+                  Create account
+                </Link>
+              </span>
+            </div>
+          )}
 
           {checkoutError && (
             <p
@@ -325,7 +407,7 @@ export default function Storefront() {
 
           <button
             type="submit"
-            disabled={placing || lines.length === 0}
+            disabled={placing || lines.length === 0 || !user}
             className="rounded-full bg-foreground px-5 py-2.5 text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-40"
           >
             {placing
@@ -364,8 +446,4 @@ export default function Storefront() {
       </aside>
     </div>
   );
-}
-
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : "Something went wrong.";
 }

@@ -1,3 +1,4 @@
+import { toBool, toInt } from '@repo/config';
 import {
   messagingConfiguration,
   type MessagingConfig,
@@ -15,39 +16,14 @@ export interface AppConfig {
   redis: {
     url: string;
   };
-  messaging: MessagingConfig;
   /**
-   * Fanout config for *consuming* domain events. Binds this service's own
-   * queue to the shared exchange, so it receives every `order.created` while
-   * other subscribers get their own copy.
+   * Event-bus config. Binds this service's own queue to the shared exchange,
+   * so it receives every `order.created` while other subscribers get a copy.
    */
-  eventBus: MessagingConfig;
+  messaging: MessagingConfig;
   seed: boolean;
-}
-
-function toInt(name: string, fallback: number, min = 0): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw === '') {
-    return fallback;
-  }
-  const value = Number.parseInt(raw, 10);
-  if (Number.isNaN(value) || value < min) {
-    throw new Error(
-      `Invalid ${name}: expected an integer >= ${min}, got '${raw}'`,
-    );
-  }
-  return value;
-}
-
-function toBool(name: string, fallback: boolean): boolean {
-  const raw = process.env[name];
-  if (raw === undefined || raw === '') {
-    return fallback;
-  }
-  if (raw !== 'true' && raw !== 'false') {
-    throw new Error(`Invalid ${name}: expected 'true' or 'false', got '${raw}'`);
-  }
-  return raw === 'true';
+  /** How many demo products to seed (fixed demo products + faker). 10-100. */
+  seedProducts: number;
 }
 
 export default function loadConfiguration(): AppConfig {
@@ -60,19 +36,21 @@ export default function loadConfiguration(): AppConfig {
     },
     database: {
       url: process.env.DATABASE_URL ?? 'postgresql://app:app@localhost:5432/app',
-      synchronize: env !== 'production',
+      // Tables are created with synchronize outside production. There are no
+      // migrations, so a production stack must opt in explicitly (the demo
+      // compose stack sets DATABASE_SYNCHRONIZE=true) or no tables are created.
+      synchronize: toBool('DATABASE_SYNCHRONIZE', env !== 'production'),
     },
     redis: {
       url: process.env.REDIS_URL ?? 'redis://localhost:6379',
     },
-    // Private connection: reply channel for the commands this service serves.
-    messaging: messagingConfiguration({ queue: 'catalog.replies' }),
-    // Event connection: same exchange as the publisher, own queue.
-    eventBus: messagingConfiguration({
-      mode: 'fanout',
+    // Single event-bus connection: same exchange as the publisher, own queue.
+    messaging: messagingConfiguration({
       exchange: 'orders.events',
       queue: 'catalog.order-events',
     }),
     seed: toBool('SEED_DB', env !== 'production'),
+    // 10-100 demo products; defaults to 50.
+    seedProducts: toInt('SEED_PRODUCTS_COUNT', 50, 10, 100),
   };
 }

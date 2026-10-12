@@ -15,6 +15,8 @@ import type {
 import { Product } from '../database/product.entity.js';
 import { OrderPlacement } from '../database/order-placement.entity.js';
 import { PRODUCT_SEED } from './product.seed.js';
+import { generateFakeProducts } from './product.faker.seed.js';
+import type { ProductPage } from './pagination.js';
 import type { CreateProductDto, UpdateProductDto } from './dto/product.dto.js';
 
 /** Upper bound of the entity's `numeric(10,2)` price column. */
@@ -32,8 +34,31 @@ export class ProductsService {
     private readonly dataSource: DataSource,
   ) {}
 
-  findAll(): Promise<Product[]> {
-    return this.products.find({ order: { name: 'ASC' } });
+  /**
+   * A page of the catalog, or all of it when neither bound is given.
+   *
+   * Both bounds are optional on purpose: `GET /products` with no query is what
+   * the admin panel and the seed scripts already call, and they should keep
+   * getting everything rather than having to know about a page size invented
+   * for the storefront.
+   *
+   * The order is `name ASC, id ASC` — not `name ASC` alone. Names are not
+   * unique, and a sort with ties lets the database return tied rows in any
+   * order per query, which means OFFSET/LIMIT can show the same product twice
+   * and skip another. The id breaks the tie, so the sequence is total and
+   * paging over it is stable.
+   */
+  findAll(page?: ProductPage): Promise<Product[]> {
+    return this.products.find({
+      order: { name: 'ASC', id: 'ASC' },
+      ...(page?.limit !== undefined ? { take: page.limit } : {}),
+      ...(page?.offset !== undefined ? { skip: page.offset } : {}),
+    });
+  }
+
+  /** Rows in the catalog, ignoring any pagination — what a pager counts against. */
+  count(): Promise<number> {
+    return this.products.count();
   }
 
   async findOne(id: string): Promise<Product> {
@@ -192,16 +217,30 @@ export class ProductsService {
     });
   }
 
-  async seed(): Promise<number> {
+  /**
+   * Seeds `count` demo products, unless the table already has rows.
+   *
+   * The fixed `PRODUCT_SEED` entries always come first (seeded orders reference
+   * their ids); the remainder are faker-generated. Runs once, on an empty table,
+   * so a restart does not multiply the catalog.
+   */
+  async seed(count: number): Promise<number> {
     const existing = await this.products.count();
     if (existing > 0) {
       this.logger.log(`Products already present (${existing}), skipping seed`);
       return 0;
     }
 
-    const entities = PRODUCT_SEED.map((product) => this.products.create(product));
+    const fixed = PRODUCT_SEED;
+    const fake = await generateFakeProducts(Math.max(count - fixed.length, 0));
+    const entities = [...fixed, ...fake].map((product) =>
+      this.products.create(product),
+    );
+
     await this.products.save(entities);
-    this.logger.log(`Seeded ${entities.length} products`);
+    this.logger.log(
+      `Seeded ${entities.length} products (${fixed.length} fixed, ${fake.length} faker)`,
+    );
     return entities.length;
   }
 }

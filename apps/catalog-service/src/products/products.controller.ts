@@ -7,17 +7,43 @@ import {
   Param,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import { ProductsService } from './products.service.js';
+import { parsePage } from './pagination.js';
+import { Product } from '../database/product.entity.js';
 import type { CreateProductDto, UpdateProductDto } from './dto/product.dto.js';
 
 @Controller('products')
 export class ProductsController {
   constructor(private readonly products: ProductsService) {}
 
+  /**
+   * `GET /products` — the catalog, optionally a page of it.
+   *
+   * `limit` and `offset` are independent: `?offset=48` with no `limit` is
+   * "everything from the 49th", which is exactly what an infinite scroll wants
+   * for its last page, and `?limit=12` with no `offset` is "the first page".
+   * Passing neither returns the whole catalog, so existing callers are
+   * unaffected.
+   */
   @Get()
-  findAll() {
-    return this.products.findAll();
+  findAll(
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ): Promise<Product[]> {
+    return this.products.findAll(parsePage(limit, offset));
+  }
+
+  /**
+   * `GET /products/count` — how many rows pagination is counting against.
+   *
+   * Declared before `:id` so Express matches the literal first; otherwise
+   * "count" would be read as a product id and 404 as an unknown uuid.
+   */
+  @Get('count')
+  async count(): Promise<{ count: number }> {
+    return { count: await this.products.count() };
   }
 
   @Get(':id')

@@ -17,7 +17,8 @@ export class ProductsSeeder implements OnApplicationBootstrap {
     }
 
     try {
-      await this.products.seed();
+      const count = this.config.getOrThrow<number>('seedProducts');
+      await this.products.seed(count);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.error(`Product seed failed: ${message}`);

@@ -1,3 +1,4 @@
+import { toBool, toInt } from '@repo/config';
 import {
   messagingConfiguration,
   type MessagingConfig,
@@ -12,39 +13,13 @@ export interface AppConfig {
     url: string;
     synchronize: boolean;
   };
-  messaging: MessagingConfig;
   /**
-   * Fanout config for publishing domain events. The *client* connection
-   * publishes through the shared exchange so every subscriber's own queue
-   * receives a copy — a plain queue would deliver to one consumer only.
+   * Event-bus config. Publishes through the shared exchange so every
+   * subscriber's own queue receives a copy — a plain queue would deliver to
+   * one consumer only.
    */
-  eventBus: MessagingConfig;
+  messaging: MessagingConfig;
   seed: boolean;
-}
-
-function toInt(name: string, fallback: number, min = 0): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw === '') {
-    return fallback;
-  }
-  const value = Number.parseInt(raw, 10);
-  if (Number.isNaN(value) || value < min) {
-    throw new Error(
-      `Invalid ${name}: expected an integer >= ${min}, got '${raw}'`,
-    );
-  }
-  return value;
-}
-
-function toBool(name: string, fallback: boolean): boolean {
-  const raw = process.env[name];
-  if (raw === undefined || raw === '') {
-    return fallback;
-  }
-  if (raw !== 'true' && raw !== 'false') {
-    throw new Error(`Invalid ${name}: expected 'true' or 'false', got '${raw}'`);
-  }
-  return raw === 'true';
 }
 
 export default function loadConfiguration(): AppConfig {
@@ -57,14 +32,13 @@ export default function loadConfiguration(): AppConfig {
     },
     database: {
       url: process.env.DATABASE_URL ?? 'postgresql://app:app@localhost:5432/app',
-      synchronize: env !== 'production',
+      // Tables are created with synchronize outside production. There are no
+      // migrations, so a production stack must opt in explicitly (the demo
+      // compose stack sets DATABASE_SYNCHRONIZE=true) or no tables are created.
+      synchronize: toBool('DATABASE_SYNCHRONIZE', env !== 'production'),
     },
-    // Private connection: only used as the reply channel for the commands
-    // this service serves (orders.create / orders.findAll / orders.findOne).
-    messaging: messagingConfiguration({ queue: 'orders.outbox' }),
     // Event connection: publishes order.created onto the shared exchange.
-    eventBus: messagingConfiguration({
-      mode: 'fanout',
+    messaging: messagingConfiguration({
       exchange: 'orders.events',
       queue: 'orders.events',
     }),

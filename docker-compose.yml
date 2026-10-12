@@ -7,6 +7,8 @@
 # with the repository root as the build context (required for turbo prune).
 #
 # Infra: PostgreSQL, Redis, RabbitMQ, and nginx as the public web/reverse proxy.
+# Admin UIs: RabbitMQ management (built into the broker), Adminer for PostgreSQL
+# and Redis Commander for Redis. All three are development conveniences only.
 
 name: nestjs-microservices
 
@@ -103,6 +105,35 @@ services:
     restart: unless-stopped
     networks: [backend]
 
+  # ---------------------------------------------------------------- admin UIs
+  # Single-container PostgreSQL client. Log in with the postgres credentials
+  # above (System: PostgreSQL, Server: postgres); they are pre-filled below.
+  adminer:
+    image: adminer:4
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+      ADMINER_DEFAULT_DRIVER: pgsql
+    ports:
+      - "${ADMINER_PORT:-8080}:8080" # -> http://localhost:${ADMINER_PORT:-8080}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [backend]
+
+  # Redis UI, pointed at the `redis` service so no connection setup is needed.
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    ports:
+      - "${REDIS_COMMANDER_PORT:-8081}:8081" # -> http://localhost:${REDIS_COMMANDER_PORT:-8081}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [backend]
+
   # ---------------------------------------------------------------- microservices
   api-gateway:
     <<: *service
@@ -136,12 +167,15 @@ services:
       dockerfile: apps/catalog-service/Dockerfile
     environment:
       <<: *service-env
-      # MESSAGING_QUEUE is the private reply queue only. Domain events arrive
-      # via a separate connection bound to the shared fanout exchange
-      # (MESSAGING_EXCHANGE); its queue is code-defined, not set here, so the
-      # two roles can never collapse onto the same queue.
-      MESSAGING_QUEUE: catalog.replies
+      # Shared event exchange; this service's own queue is code-defined, so two
+      # subscribers can never collapse onto the same queue.
       MESSAGING_EXCHANGE: orders.events
+      # Demo stack: create tables and sample products on first boot.
+      DATABASE_SYNCHRONIZE: "true"
+      SEED_DB: "true"
+      # How many demo products to seed (10-100). Fixed demo products first,
+      # then faker-generated ones fill the remainder.
+      SEED_PRODUCTS_COUNT: ${SEED_PRODUCTS_COUNT:-50}
     expose: ["3000"]
 
   identity-service:
@@ -158,6 +192,12 @@ services:
       # required in production. Change both before exposing this stack.
       AUTH_ADMIN_EMAIL: ${AUTH_ADMIN_EMAIL:-admin@example.com}
       AUTH_ADMIN_PASSWORD: ${AUTH_ADMIN_PASSWORD:-admin12345}
+      # NODE_ENV=production defaults SEED_DB to false, so seeding must be
+      # requested explicitly here or the admin account is never created.
+      SEED_DB: "true"
+      # There are no migrations, so production also defaults schema syncing off
+      # and TypeORM would create no tables ("relation \"users\" does not exist").
+      DATABASE_SYNCHRONIZE: "true"
     expose: ["3000"]
 
   notifications-service:
@@ -167,7 +207,7 @@ services:
       dockerfile: apps/notifications-service/Dockerfile
     environment:
       <<: *service-env
-      MESSAGING_QUEUE: notifications.replies
+      # Shared event exchange; this service's own queue is code-defined.
       MESSAGING_EXCHANGE: orders.events
     expose: ["3000"]
 
@@ -178,10 +218,12 @@ services:
       dockerfile: apps/orders-service/Dockerfile
     environment:
       <<: *service-env
-      # Private reply queue; events are published to the fanout exchange by a
-      # separate client connection.
-      MESSAGING_QUEUE: orders.outbox
+      # Publishes order.created to the shared event exchange; it consumes
+      # nothing, so it binds no queue.
       MESSAGING_EXCHANGE: orders.events
+      # Demo stack: create tables and sample orders on first boot.
+      DATABASE_SYNCHRONIZE: "true"
+      SEED_DB: "true"
     expose: ["3000"]
 
   # ---------------------------------------------------------------- frontends
@@ -190,6 +232,22 @@ services:
     build:
       context: .
       dockerfile: apps/storefront/Dockerfile
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # Everything the browser fetches is same-origin behind nginx, so both
+      # public bases are relative. They differ because nginx splits /api:
+      #   /api/products*   -> api-gateway (public catalog)
+      #   /api/storefront* -> this app (sign in/up, session, order history)
+      # NEXT_PUBLIC_* are inlined at build time, so they must be present in the
+      # *builder* stage too — see apps/storefront/Dockerfile.
+      NEXT_PUBLIC_API_URL: /api
+      NEXT_PUBLIC_APP_BASE: /api/storefront
+      # Server-side base URL for the gateway, used by this app's own route
+      # handlers (see apps/storefront/app/lib/gateway.ts). It must be the
+      # compose service name: the relative bases above resolve, from inside this
+      # container, to the storefront itself.
+      API_GATEWAY_URL: http://api-gateway:4000
     expose: ["3000"]
 
   admin:

@@ -10,6 +10,7 @@ import {
 import { bearerToken } from '@repo/contracts';
 import { AuthService } from './auth.service.js';
 import type { LoginDto } from './dto/login.dto.js';
+import type { RegisterDto } from './dto/register.dto.js';
 
 @Controller('auth')
 export class AuthController {
@@ -19,6 +20,17 @@ export class AuthController {
   @HttpCode(200)
   login(@Body() dto: LoginDto) {
     return this.auth.login(dto?.email, dto?.password);
+  }
+
+  /**
+   * Public signup for shop customers, and the only way a non-admin account
+   * comes into existence. Returns the same shape as `login`, so a client can
+   * treat "signed up" and "signed in" as one state transition.
+   */
+  @Post('register')
+  @HttpCode(201)
+  register(@Body() dto: RegisterDto) {
+    return this.auth.register(dto);
   }
 
   @Get('me')
