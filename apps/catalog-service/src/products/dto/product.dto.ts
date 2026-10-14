@@ -1,13 +1,4 @@
-/**
- * Write-side product contracts.
- *
- * Plain interfaces validated by hand in `ProductsService`, the same convention
- * `orders-service` uses for `CreateOrderDto`: the repo does not depend on
- * class-validator, so a shape that needs checking gets an explicit validator
- * with a readable error instead of a decorator that silently no-ops when the
- * pipe is not wired up.
- */
-
+/** Write-side product contracts, validated by hand in `ProductsService`. */
 export interface CreateProductDto {
   name: string;
   /** Decimal amount; accepted as a string ("129.99") or a number. */

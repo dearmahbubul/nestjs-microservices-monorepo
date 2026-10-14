@@ -35,20 +35,10 @@ export class OrdersService {
     private readonly events: OrderEventsPublisher,
   ) {}
 
-  /**
-   * All orders, or just one customer's when `customerEmail` is supplied.
-   *
-   * The caller decides which — see the gateway's `applyIdentityScope`, which
-   * overwrites `customerEmail` on the way in with the email from the verified
-   * token. This service does not authenticate anybody, so it must not be the
-   * one deciding whose orders these are: a `customerEmail` that reached it
-   * unvetted would be a filter an attacker chooses, and the answer would be
-   * somebody else's order history.
-   *
-   * An empty filter is treated as "no filter" rather than "no orders": the
-   * gateway injects a non-empty email or nothing at all, so an empty string
-   * means a caller sent `?customerEmail=` to a route that was never scoped.
-   */
+  // All orders, or just one customer's when `customerEmail` is supplied. The
+  // gateway overwrites that filter from the session token, so a value that
+  // reached this service unvetted is still not caller-controlled. An empty
+  // filter means "no filter".
   findAll(customerEmail?: string): Promise<Order[]> {
     const email = customerEmail?.trim();
     return this.orders.find({
@@ -99,7 +89,7 @@ export class OrdersService {
     );
 
     // Reload so the items (including their generated ids) are present before
-    // the event is built — the in-memory entities have no ids yet.
+    // the event is built.
     const placed = await this.findOne(saved.id);
     this.events.announceCreated(placed);
     return placed;

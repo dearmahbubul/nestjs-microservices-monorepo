@@ -49,6 +49,7 @@ export default function loadConfiguration(): AppConfig {
       identity: toUrl('IDENTITY_SERVICE_URL', 'http://localhost:3000'),
       orders: toUrl('ORDERS_SERVICE_URL', 'http://localhost:3000'),
       notifications: toUrl('NOTIFICATIONS_SERVICE_URL', 'http://localhost:3000'),
+      cart: toUrl('CART_SERVICE_URL', 'http://localhost:3000'),
     },
     auth: {
       jwtSecret: jwtSecret(env),

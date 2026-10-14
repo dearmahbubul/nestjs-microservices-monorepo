@@ -15,20 +15,12 @@ import { User } from '../database/user.entity.js';
 import type { AppConfig } from '../config/configuration.js';
 import type { RegisterDto } from './dto/register.dto.js';
 
-/** Argon2id parameters. `type` is explicit so a future default change can't move us. */
 const HASH_OPTIONS = { type: argon2.argon2id } as const;
-
-/** Shortest password we will store. Length is the only rule — the rest is theatre. */
 const MIN_PASSWORD_LENGTH = 8;
-
-/**
- * Deliberately permissive: one `@`, a dot in the domain, nothing else. Anything
- * stricter rejects real addresses, and the only thing an email has to survive
- * here is a round trip to the confirmation email.
- */
+// Deliberately permissive: one @, a dot in the domain, nothing else.
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-/** Emails are compared case-insensitively; the column stores the normal form. */
+// Emails are compared case-insensitively; the column stores the normal form.
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
@@ -59,13 +51,8 @@ export class AuthService {
     this.adminPassword = auth.adminPassword;
   }
 
-  /**
-   * Exchanges credentials for a token.
-   *
-   * A wrong password and an unknown account produce the *same* error and take
-   * the *same* time — see `burnPasswordCheck`. Anything else lets an attacker
-   * enumerate who has an account.
-   */
+  // A wrong password and an unknown account produce the *same* error and take
+  // the *same* time — anything else lets an attacker enumerate accounts.
   async login(email: unknown, password: unknown): Promise<LoginResponse> {
     if (
       typeof email !== 'string' ||
@@ -96,31 +83,18 @@ export class AuthService {
     return { token, user: toAuthUser(user) };
   }
 
-  /**
-   * Creates a `customer` account and signs it in.
-   *
-   * The role is hard-coded. There is no path through this method that produces
-   * an admin — the seeded account is the only one, and a caller-supplied role
-   * would be privilege escalation with extra steps.
-   *
-   * Unlike `login`, an address that is already taken is reported as such. That
-   * is a deliberate reversal of the enumeration defence: the caller is choosing
-   * an email, and "already registered, sign in instead" is the only answer that
-   * lets them finish. Login keeps the uniform error, because there the attacker
-   * has nothing to guess against but an existing account.
-   */
+  // Creates a `customer` account and signs it in. The role is hard-coded: a
+  // caller-supplied role would be privilege escalation with extra steps.
   async register(dto: RegisterDto): Promise<LoginResponse> {
     const email = this.validatedEmail(dto?.email);
     const password = this.validatedPassword(dto?.password);
 
-    // Take the hash *before* the existence check so a duplicate and a fresh
-    // address cost roughly the same, rather than registering being visibly
-    // faster than colliding.
+    // Hash before the existence check so a duplicate and a fresh address cost
+    // roughly the same.
     const passwordHash = await argon2.hash(password, HASH_OPTIONS);
 
     try {
-      // One insert, and the unique index on `email` decides: checking first and
-      // then inserting would let two concurrent signups both pass the check.
+      // One insert; the unique index on `email` decides.
       const user = await this.users.save(
         this.users.create({ email, passwordHash, role: 'customer' }),
       );
@@ -158,14 +132,9 @@ export class AuthService {
     return value;
   }
 
-  /**
-   * Resolves the user behind a token.
-   *
-   * The gateway already verified the token before forwarding, but this service
-   * verifies it again rather than trusting the hop: `identity-service` is
-   * reachable on the compose network without going through the gateway, and a
-   * service that only checks auth when proxied is not actually protected.
-   */
+  // The gateway already verified the token before forwarding; this service
+  // verifies again rather than trusting the hop, since it is reachable on the
+  // compose network without going through the gateway.
   async currentUser(token: string): Promise<AuthUser> {
     let claims: TokenClaims;
     try {
@@ -182,14 +151,9 @@ export class AuthService {
     return toAuthUser(user);
   }
 
-  /**
-   * Creates the admin account from configuration if it is absent.
-   *
-   * Never rotates an existing password: `AUTH_ADMIN_PASSWORD` seeds the account
-   * once, and afterwards the database is the source of truth. A mismatch is
-   * logged loudly rather than silently overwriting a password someone changed
-   * on purpose.
-   */
+  // Creates the admin account from configuration if it is absent. Never
+  // rotates an existing password: after seeding, the database is the source
+  // of truth.
   async seed(): Promise<number> {
     const email = normalizeEmail(this.adminEmail);
     const existing = await this.findWithHash(email);
@@ -216,10 +180,8 @@ export class AuthService {
     return 1;
   }
 
-  /**
-   * `passwordHash` is `select: false` on the entity, so it never rides along on
-   * an ordinary `find()`. The two places that genuinely need it ask here.
-   */
+  // `passwordHash` is `select: false` on the entity, so it never rides along
+  // on an ordinary find(); the two places that need it ask here.
   private findWithHash(email: string): Promise<User | null> {
     return this.users
       .createQueryBuilder('user')
@@ -228,25 +190,17 @@ export class AuthService {
       .getOne();
   }
 
-  /**
-   * Does the same work as a real verify when the account does not exist, so the
-   * response time for "no such user" matches "wrong password". Without this the
-   * fast path is a timing oracle that enumerates accounts.
-   */
+  // Same work as a real verify when the account does not exist, so the
+  // response time for "no such user" matches "wrong password".
   private async burnPasswordCheck(password: string): Promise<void> {
     this.decoyHash ??= await argon2.hash('decoy-password', HASH_OPTIONS);
     await argon2.verify(this.decoyHash, password).catch(() => false);
   }
 }
 
-/**
- * Did this insert collide with the unique index on `email`?
- *
- * Checked structurally rather than by `instanceof`: the driver's error class is
- * not exported in a way worth importing, and this has to keep working if the
- * demo stack is pointed at a different database. Postgres reports `23505`;
- * SQLite reports `SQLITE_CONSTRAINT_UNIQUE` in the message.
- */
+// Did this insert collide with the unique index on `email`? Checked
+// structurally rather than by instanceof. Postgres reports 23505; SQLite
+// reports SQLITE_CONSTRAINT_UNIQUE in the message.
 function isUniqueViolation(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) {
     return false;

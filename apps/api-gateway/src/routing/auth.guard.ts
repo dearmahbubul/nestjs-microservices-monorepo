@@ -15,21 +15,11 @@ export interface AuthenticatedRequest extends Request {
   auth?: TokenClaims;
 }
 
-/**
- * Verifies session tokens for the routes listed in `PROTECTED_ROUTES`.
- *
- * The gateway is the single place every external request passes through, so
- * this is the one choke point where authentication can be enforced for all
- * services at once — otherwise each service would need its own guard and any
- * one of them forgetting would leave a hole.
- *
- * Only headers are read. The request body is deliberately left untouched: the
- * proxy streams it downstream, and consuming it here would break that.
- *
- * The verified claims are stashed on the request so the proxy can act on the
- * authenticated identity (see `ProxyService.forward`) without verifying the
- * token a second time or, worse, trusting something the client sent.
- */
+// Verifies session tokens for the routes listed in PROTECTED_ROUTES. The
+// gateway is the single choke point every external request passes through, so
+// this is the one place auth can be enforced for all services at once.
+// Only headers are read: the proxy streams the body downstream, and consuming
+// it here would break that.
 @Injectable()
 export class AuthGuard implements CanActivate {
   constructor(private readonly jwt: JwtService) {}
@@ -39,17 +29,9 @@ export class AuthGuard implements CanActivate {
     const requirement = authRequirementFor(request.method, request.originalUrl);
 
     if (requirement.kind === 'public') {
-      // A public route still gets its identity established when a token is
-      // present, because "public" and "unsigned" are not the same thing here.
-      // Order creation is deliberately open — an anonymous visitor may buy
-      // something — but the proxy has to know who is asking in order to stamp
-      // the order with the right email. Without this the body's own
-      // `customerEmail` would be taken at face value and an order could be
-      // filed under somebody else's address.
-      //
-      // A token that is absent or invalid is not an error on a public route:
-      // the request simply proceeds unauthenticated, and the proxy supplies no
-      // scope. Only a *verified* token can widen or narrow anything.
+      // Public is not the same as unsigned: POST /orders is open so anonymous
+      // checkout works, but the proxy needs the caller's identity to stamp the
+      // order. An absent or invalid token simply proceeds unauthenticated.
       const token = bearerToken(request.headers.authorization);
       if (token) {
         try {

@@ -11,12 +11,8 @@ export class OrdersController {
     return this.orders.create(dto);
   }
 
-  /**
-   * The gateway sets `customerEmail` from the session token before forwarding,
-   * and deletes whatever the client asked for. Reading it off the query is
-   * therefore safe *here* only because the only way in is through that proxy;
-   * see `OrdersService.findAll`.
-   */
+  // The gateway sets `customerEmail` from the session token before forwarding,
+  // and deletes whatever the client asked for.
   @Get()
   findAll(@Query('customerEmail') customerEmail?: string) {
     return this.orders.findAll(customerEmail);

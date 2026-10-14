@@ -2,14 +2,9 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { OrderCreatedEvent } from '@repo/contracts';
 import { randomUUID } from 'node:crypto';
 
-/**
- * Sends customer-facing order notifications.
- *
- * There is no real mail/SMS provider wired up yet, so a "send" is a structured
- * log record plus an in-memory record of what was sent. That keeps the flow
- * honest — the transport and idempotency are real, only the final delivery
- * step is a stub — and makes it a single-file change to swap in a provider.
- */
+// Sends customer-facing order notifications. No real mail/SMS provider is
+// wired up yet, so a "send" is a structured log record plus an in-memory
+// record of what was sent; swapping in a provider is a single-file change.
 export interface SentNotification {
   id: string;
   channel: 'email';
@@ -29,14 +24,9 @@ export class NotificationsService {
   private readonly sent: SentNotification[] = [];
   private static readonly MAX_KEPT = 100;
 
-  /**
-   * Confirms a placed order by email.
-   *
-   * Idempotent by `eventId`: a redelivered event is recognised and not sent
-   * twice. The guard is an in-memory set, which is correct for a single
-   * instance; a multi-instance deployment needs a shared store (Redis sits
-   * right there in the compose stack) — noted rather than pretended.
-   */
+  // Idempotent by `eventId`: a redelivered event is recognised and not sent
+  // twice. The guard is an in-memory set, correct for a single instance;
+  // a multi-instance deployment needs a shared store (Redis is in the stack).
   sendOrderConfirmation(event: OrderCreatedEvent): SentNotification {
     const already = this.sent.find((n) => n.eventId === event.eventId);
     if (already) {

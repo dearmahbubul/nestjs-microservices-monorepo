@@ -1,12 +1,14 @@
 import { Controller, Get } from '@nestjs/common';
-import { DataSource } from 'typeorm';
+import { InjectConnection } from '@nestjs/mongoose';
+import type { Connection } from 'mongoose';
 import { MessagingService } from '@repo/messaging';
 import { RedisService } from '../redis/redis.service.js';
 
 @Controller('health')
 export class HealthController {
   constructor(
-    private readonly dataSource: DataSource,
+    @InjectConnection()
+    private readonly connection: Connection,
     private readonly redis: RedisService,
     private readonly messaging: MessagingService,
   ) {}
@@ -16,7 +18,7 @@ export class HealthController {
     const checks = { database: false, redis: false, messaging: false };
 
     try {
-      await this.dataSource.query('SELECT 1');
+      await this.connection.db?.admin().ping();
       checks.database = true;
     } catch {
       /* keep false */

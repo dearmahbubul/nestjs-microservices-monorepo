@@ -6,33 +6,27 @@
 # Every app image is built from its own Dockerfile in apps/<app>/Dockerfile
 # with the repository root as the build context (required for turbo prune).
 #
-# Infra: PostgreSQL, Redis, RabbitMQ, and nginx as the public web/reverse proxy.
-# Admin UIs: RabbitMQ management (built into the broker), Adminer for PostgreSQL
-# and Redis Commander for Redis. All three are development conveniences only.
+# Infra: PostgreSQL, MongoDB, Redis, RabbitMQ, and nginx as the public web/reverse proxy.
+# Each service owns its own database:
+#   identity-service  -> postgres db `identity`
+#   orders-service    -> postgres db `orders`
+#   catalog-service   -> mongo db `catalog`
+#   cart-service      -> mongo db `cart`
+# Admin UIs: RabbitMQ management (built into the broker) and Adminer for
+# PostgreSQL. Both are development conveniences only.
 
 name: nestjs-microservices
 
 # ---------------------------------------------------------------- anchors
-# Shared settings for the NestJS microservices (they all talk to the infra below).
+# Shared settings for the NestJS microservices (they all expose GET /health;
+# probe it with the bundled Node runtime). Connection strings and depends_on
+# are per-service: each one depends only on the infra it actually uses.
 x-service: &service
   restart: unless-stopped
   networks: [backend]
-  depends_on:
-    postgres:
-      condition: service_healthy
-    redis:
-      condition: service_healthy
-    rabbitmq:
-      condition: service_healthy
   environment: &service-env
     NODE_ENV: production
     PORT: 3000
-    # Connection strings for the infra. Update when you actually wire the services up.
-    DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-app}
-    REDIS_URL: redis://redis:6379
-    RABBITMQ_URL: amqp://${RABBITMQ_USER:-app}:${RABBITMQ_PASSWORD:-app}@rabbitmq:5672
-  # Every NestJS service exposes GET /health; probe it with the bundled Node runtime.
-  # Services that listen on a non-default port override HEALTHCHECK_PORT.
   healthcheck:
     test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:'+(process.env.HEALTHCHECK_PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
     interval: 15s
@@ -56,15 +50,39 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-app}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
       POSTGRES_DB: ${POSTGRES_DB:-app}
+    # Creates the per-service databases on a fresh volume. Skipped on an
+    # existing volume (init scripts run only on first boot).
+    volumes:
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+      - postgres-data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app}"]
       interval: 5s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
+    networks: [backend]
+
+  # Single MongoDB for the two document-shaped services (catalog, cart), each
+  # with its own database in the same server.
+  mongo:
+    image: mongo:7
+    # A standalone mongod refuses transactions; the single-node replica set
+    # turns them on. catalog-service's stock reservation needs them.
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    volumes:
+      - mongo-data:/data/db
+    # Initiates the replica set on first boot; steady state just reports ok.
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval \"try { rs.status().ok } catch (e) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'mongo:27017' }] }) }\""]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 10s
     restart: unless-stopped
     networks: [backend]
 
@@ -121,19 +139,6 @@ services:
     restart: unless-stopped
     networks: [backend]
 
-  # Redis UI, pointed at the `redis` service so no connection setup is needed.
-  redis-commander:
-    image: rediscommander/redis-commander:latest
-    environment:
-      REDIS_HOSTS: local:redis:6379
-    ports:
-      - "${REDIS_COMMANDER_PORT:-8081}:8081" # -> http://localhost:${REDIS_COMMANDER_PORT:-8081}
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-    networks: [backend]
-
   # ---------------------------------------------------------------- microservices
   api-gateway:
     <<: *service
@@ -154,28 +159,53 @@ services:
       IDENTITY_SERVICE_URL: http://identity-service:3000
       ORDERS_SERVICE_URL: http://orders-service:3000
       NOTIFICATIONS_SERVICE_URL: http://notifications-service:3000
+      CART_SERVICE_URL: http://cart-service:3000
       # Verifies session tokens on protected routes; must match the value
       # identity-service signs with, or every write will 401.
       AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-dev-only-insecure-jwt-secret-change-me}
     ports:
       - "4000:4000" # public entry point (also proxied by nginx at /api)
 
+  # Catalog: MongoDB, one collection for products and one for the reservation
+  # ledger. reserveStock runs as a transaction, which is why mongo is gated on
+  # the replica set being initiated.
   catalog-service:
     <<: *service
     build:
       context: .
       dockerfile: apps/catalog-service/Dockerfile
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
       <<: *service-env
       # Shared event exchange; this service's own queue is code-defined, so two
       # subscribers can never collapse onto the same queue.
       MESSAGING_EXCHANGE: orders.events
-      # Demo stack: create tables and sample products on first boot.
-      DATABASE_SYNCHRONIZE: "true"
+      RABBITMQ_URL: amqp://app:app@rabbitmq:5672
+      MONGODB_URI: mongodb://mongo:27017/catalog?replicaSet=rs0
+      REDIS_URL: redis://redis:6379
+      # Demo stack: seed sample products on first boot (no-op if not empty).
       SEED_DB: "true"
-      # How many demo products to seed (10-100). Fixed demo products first,
-      # then faker-generated ones fill the remainder.
       SEED_PRODUCTS_COUNT: ${SEED_PRODUCTS_COUNT:-50}
+    expose: ["3000"]
+
+  # Cart: MongoDB, one document per customer holding every cart line.
+  cart-service:
+    <<: *service
+    build:
+      context: .
+      dockerfile: apps/cart-service/Dockerfile
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      <<: *service-env
+      MONGODB_URI: mongodb://mongo:27017/cart?replicaSet=rs0
     expose: ["3000"]
 
   identity-service:
@@ -183,8 +213,12 @@ services:
     build:
       context: .
       dockerfile: apps/identity-service/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       <<: *service-env
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/identity
       # Signs the session tokens the gateway verifies. Required in production:
       # the service refuses to boot without it (see its loadConfiguration()).
       AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-dev-only-insecure-jwt-secret-change-me}
@@ -205,10 +239,14 @@ services:
     build:
       context: .
       dockerfile: apps/notifications-service/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
     environment:
       <<: *service-env
       # Shared event exchange; this service's own queue is code-defined.
       MESSAGING_EXCHANGE: orders.events
+      RABBITMQ_URL: amqp://app:app@rabbitmq:5672
     expose: ["3000"]
 
   orders-service:
@@ -216,11 +254,19 @@ services:
     build:
       context: .
       dockerfile: apps/orders-service/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
       <<: *service-env
+      # Own postgres database, separate from identity's.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/orders
       # Publishes order.created to the shared event exchange; it consumes
       # nothing, so it binds no queue.
       MESSAGING_EXCHANGE: orders.events
+      RABBITMQ_URL: amqp://app:app@rabbitmq:5672
       # Demo stack: create tables and sample orders on first boot.
       DATABASE_SYNCHRONIZE: "true"
       SEED_DB: "true"
@@ -238,7 +284,7 @@ services:
       # Everything the browser fetches is same-origin behind nginx, so both
       # public bases are relative. They differ because nginx splits /api:
       #   /api/products*   -> api-gateway (public catalog)
-      #   /api/storefront* -> this app (sign in/up, session, order history)
+      #   /api/storefront* -> this app (sign in/up, session, cart, order history)
       # NEXT_PUBLIC_* are inlined at build time, so they must be present in the
       # *builder* stage too — see apps/storefront/Dockerfile.
       NEXT_PUBLIC_API_URL: /api
@@ -280,6 +326,7 @@ services:
 
 volumes:
   postgres-data:
+  mongo-data:
   redis-data:
   rabbitmq-data:
 

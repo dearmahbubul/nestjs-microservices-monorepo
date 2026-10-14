@@ -10,7 +10,7 @@ import type { AppConfig } from '../config/configuration.js';
 import type { AuthenticatedRequest } from './auth.guard.js';
 import type { ServiceName } from './service-registry.js';
 
-/** Socket errors that mean "the service could not be reached at all". */
+// Socket errors that mean "the service could not be reached at all".
 const CONNECT_ERROR_CODES = new Set([
   'ECONNREFUSED',
   'ENOTFOUND',
@@ -23,50 +23,17 @@ const CONNECT_ERROR_CODES = new Set([
   'UND_ERR_CONNECT_TIMEOUT',
 ]);
 
-/**
- * Query parameters the gateway owns: whatever the client sends under these
- * names is discarded and replaced with the authenticated value.
- *
- * This is the whole reason order history is readable at all without a fat
- * security hole. `orders-service` filters orders by `customerEmail`, and the
- * only trustworthy source for that is the token — so `?customerEmail=` is
- * never a filter, it is a request that the gateway answers on the client's
- * behalf. Deleting first and appending second matters: passing the client's
- * value through and adding a second one would leave the service to pick, and
- * `URLSearchParams.get` picks the first.
- */
+// Query parameters the gateway owns: whatever the client sends under these
+// names is discarded and replaced with the authenticated value.
 const GATEWAY_OWNED_PARAMS = ['customerEmail'] as const;
 
-/**
- * Prefixes holding a body field the gateway owns.
- *
- * `customerEmail` is trusted in two places, not one: `orders-service` reads it
- * off the query to *list* orders, and off the JSON body to *create* one
- * (`OrdersService.create` -> `dto.customerEmail`). The query rewrite above
- * cannot reach a body, so without this a signed-in customer could post
- * `{"customerEmail": "someone@else.com"}` and file an order into a stranger's
- * history — which is exactly the outcome scoping the reads was meant to
- * prevent. Both halves have to be rewritten for the invariant to hold: an order
- * is always filed under the session's email.
- *
- * Only these prefixes get their bodies parsed. Every other request stays a
- * pure stream, which is the property `bodyParser: false` in `main.ts` exists to
- * preserve.
- */
+// Prefixes holding a body field the gateway owns. `customerEmail` is trusted
+// in two places: the query (orders list) and the body (orders create).
 const BODY_SCOPED_PREFIXES = new Set(['orders']);
 
-/**
- * A replacement body, stashed on the request for the `proxyReq` hook to write.
- *
- * The obvious place to hand this over is an extra argument to the handler, and
- * `httpxy` does consult `options.buffer` — but `http-proxy-middleware` builds
- * its own options object and calls `this.proxy.web(req, res, activeProxyOptions)`
- * with exactly three arguments, so anything passed from here is dropped before
- * it can be seen. Verified in the installed 4.2.0, not assumed.
- *
- * The supported hook is `on.proxyReq`, which runs with the outgoing
- * `ClientRequest` in hand. That is where the body below is written.
- */
+// Stash for the replacement body, handed to the proxy via `on.proxyReq`
+// (http-proxy-middleware builds its own options object, so an extra handler
+// argument never reaches httpxy — verified in the installed 4.2.0).
 const SCOPED_BODY = Symbol('scopedBody');
 
 type ScopedRequest = Request & { [SCOPED_BODY]?: Buffer };
@@ -81,10 +48,6 @@ export class ProxyService {
     this.timeoutMs = this.config.getOrThrow<AppConfig['app']>('app').requestTimeoutMs;
   }
 
-  /**
-   * Buffers a replacement body when the request is an authenticated write to a
-   * scoped prefix, then forwards. Everything else streams straight through.
-   */
   async forward(service: ServiceName, req: Request, res: Response): Promise<void> {
     applyIdentityScope(req);
     const body = await scopedBody(req);
@@ -94,7 +57,7 @@ export class ProxyService {
     return this.proxyFor(service)(req, res);
   }
 
-  /** One proxy per service, created lazily and reused for every request. */
+  // One proxy per service, created lazily and reused for every request.
   private proxyFor(service: ServiceName): RequestHandler {
     let proxy = this.proxies.get(service);
     if (!proxy) {
@@ -162,22 +125,10 @@ function isConnectError(error: unknown): boolean {
   return code !== undefined && CONNECT_ERROR_CODES.has(code);
 }
 
-/**
- * Rewrites the proxied URL so gateway-owned query parameters reflect the
- * authenticated caller rather than the client's request.
- *
- * Public requests are left alone: with no `auth` on the request there is no
- * identity to inject, and stripping the parameter would only turn a harmless
- * no-op into a silently different query. A protected route cannot reach here
- * without claims, because the guard runs first and rejects the request, so the
- * unauthenticated case is only ever a public route.
- *
- * The mutation is safe with respect to the proxy: `http-proxy-middleware`
- * reads `req.url` when it forwards, and this runs before the handler is
- * invoked. Note that `req.originalUrl` is *not* updated — that is deliberate,
- * so the guard and the 404 handler keep seeing what the client actually asked
- * for.
- */
+// Rewrites the proxied URL so gateway-owned query parameters reflect the
+// authenticated caller. Public requests are left alone: no `auth` means no
+// identity to inject. `req.originalUrl` is deliberately NOT updated, so the
+// guard and the 404 handler keep seeing what the client asked for.
 function applyIdentityScope(req: Request): void {
   const claims = (req as AuthenticatedRequest).auth;
   if (!claims) {
@@ -195,24 +146,10 @@ function applyIdentityScope(req: Request): void {
   req.url = query === '' ? pathname : `${pathname}?${query}`;
 }
 
-/**
- * Returns a replacement body buffer when the request is an authenticated write
- * to a scoped prefix, or `null` to leave the request stream alone.
- *
- * A no-op for everything else, so the common case still streams straight
- * through and `bodyParser: false` in `main.ts` keeps meaning what it says.
- *
- * The replacement is handed to the proxy as `options.buffer`, which
- * `httpxy` uses in place of `req` when piping the outgoing body
- * (`(options.buffer || req).pipe(proxyReq)`). That is the supported way in, and
- * it avoids mutating an Express request in place — which would mean swapping
- * the stream, the `content-length`, and the `content-encoding` mid-flight and
- * hoping nothing else had cached a reference to the original.
- *
- * A body that is absent, empty, or not a JSON object is forwarded untouched
- * rather than rejected: the service stays the authority on what a valid body
- * is, and the gateway only ever overwrites a field it owns.
- */
+// Replacement body buffer for an authenticated write to a scoped prefix, or
+// null to leave the request stream alone. A body that is absent, empty, or not
+// a JSON object is forwarded untouched — the service stays the authority on
+// what a valid body is, and the gateway only overwrites a field it owns.
 async function scopedBody(req: Request): Promise<Buffer | null> {
   const claims = (req as AuthenticatedRequest).auth;
   if (!claims) {
@@ -250,25 +187,11 @@ async function scopedBody(req: Request): Promise<Buffer | null> {
   );
 }
 
-/**
- * Writes the stashed replacement body to the outgoing request.
- *
- * `httpxy` has already wired `req.pipe(proxyReq)` before this hook runs, and
- * that pipe is still live — so simply ending the outgoing request and writing
- * the replacement races the pipe, which later writes its own chunk into a
- * closed stream and fails with `write after end`. The pipe has to be detached
- * first with `unpipe`, which is what actually cancels the original body
- * transfer; `end()` alone only marks the destination finished.
- *
- * Order: `req` is still flowing, so it is drained and destroyed to stop it
- * emitting, the outgoing request is unpiped, then the replacement is written
- * and closed. The outgoing `Content-Length` is corrected too, because a
- * rewritten JSON body is almost never the same size as the original and the
- * proxy copies the original header verbatim.
- *
- * A no-op unless `forward` stashed a body, so every other request on this
- * service keeps the untouched pass-through path.
- */
+// Writes the stashed replacement body to the outgoing request. httpxy has
+// already wired req.pipe(proxyReq), so the pipe must be detached first
+// (`unpipe`) or the original body later writes into a closed stream. The
+// outgoing Content-Length is corrected too — a rewritten body is almost never
+// the same size as the original.
 function writeScopedBody(proxyReq: ClientRequest, req: ScopedRequest): void {
   const body = req[SCOPED_BODY];
   if (!body) {
@@ -281,21 +204,15 @@ function writeScopedBody(proxyReq: ClientRequest, req: ScopedRequest): void {
 
   proxyReq.setHeader('content-length', String(body.byteLength));
   // The replacement is plain JSON, so any encoding the client claimed for the
-  // bytes we just discarded no longer applies.
+  // discarded bytes no longer applies.
   proxyReq.removeHeader('content-encoding');
 
   proxyReq.end(body);
 }
 
-/**
- * Drains the request stream to a string, or `null` when there is nothing to
- * read.
- *
- * An `error` resolves to `null` rather than rejecting: a client that hung up
- * mid-body is not the gateway's problem to report, and letting it fail here
- * would turn a broken upload into a 500 from a component that only meant to
- * peek at a field.
- */
+// Drains the request stream to a string, or null when there is nothing to
+// read. An `error` resolves to null: a client that hung up mid-body is not
+// the gateway's problem to report.
 function readBody(req: Request): Promise<string | null> {
   if (req.readableEnded) {
     return Promise.resolve(null);

@@ -3,12 +3,8 @@ import { Controller, Logger } from '@nestjs/common';
 import { EventPattern, Payload } from '@nestjs/microservices';
 import { NotificationsService } from './notifications.service.js';
 
-/**
- * Turns order events into customer notifications.
- *
- * `@EventPattern`, not `@MessagePattern`: the order is already placed and
- * answered, so nothing is waiting on a reply here.
- */
+// @EventPattern, not @MessagePattern: the order is already placed and
+// answered, so nothing is waiting on a reply here.
 @Controller()
 export class NotificationsMessagingController {
   private readonly logger = new Logger(NotificationsMessagingController.name);

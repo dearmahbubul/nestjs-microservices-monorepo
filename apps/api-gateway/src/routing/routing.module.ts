@@ -8,8 +8,8 @@ import { ProxyService } from './proxy.service.js';
 
 @Module({
   imports: [
-    // Verification only — the gateway never signs. It reads the same
-    // AUTH_JWT_SECRET identity-service issues tokens with.
+    // Verification only — the gateway never signs. Same AUTH_JWT_SECRET
+    // identity-service issues tokens with.
     JwtModule.registerAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({

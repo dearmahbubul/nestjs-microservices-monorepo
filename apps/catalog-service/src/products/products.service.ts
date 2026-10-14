@@ -4,22 +4,21 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { InjectConnection, InjectModel } from '@nestjs/mongoose';
+import type { Connection, HydratedDocument, Model } from 'mongoose';
 import type {
   ReserveStockFailure,
   ReserveStockLine,
   ReserveStockRequest,
   ReserveStockResponse,
 } from '@repo/contracts';
-import { Product } from '../database/product.entity.js';
-import { OrderPlacement } from '../database/order-placement.entity.js';
+import { Product } from '../database/product.schema.js';
+import { OrderPlacement } from '../database/order-placement.schema.js';
 import { PRODUCT_SEED } from './product.seed.js';
 import { generateFakeProducts } from './product.faker.seed.js';
 import type { ProductPage } from './pagination.js';
 import type { CreateProductDto, UpdateProductDto } from './dto/product.dto.js';
 
-/** Upper bound of the entity's `numeric(10,2)` price column. */
 const MAX_PRICE = 99_999_999.99;
 
 @Injectable()
@@ -27,69 +26,51 @@ export class ProductsService {
   private readonly logger = new Logger(ProductsService.name);
 
   constructor(
-    @InjectRepository(Product)
-    private readonly products: Repository<Product>,
-    @InjectRepository(OrderPlacement)
-    private readonly placements: Repository<OrderPlacement>,
-    private readonly dataSource: DataSource,
+    @InjectModel(Product.name)
+    private readonly products: Model<Product>,
+    @InjectModel(OrderPlacement.name)
+    private readonly placements: Model<OrderPlacement>,
+    @InjectConnection()
+    private readonly connection: Connection,
   ) {}
 
-  /**
-   * A page of the catalog, or all of it when neither bound is given.
-   *
-   * Both bounds are optional on purpose: `GET /products` with no query is what
-   * the admin panel and the seed scripts already call, and they should keep
-   * getting everything rather than having to know about a page size invented
-   * for the storefront.
-   *
-   * The order is `name ASC, id ASC` — not `name ASC` alone. Names are not
-   * unique, and a sort with ties lets the database return tied rows in any
-   * order per query, which means OFFSET/LIMIT can show the same product twice
-   * and skip another. The id breaks the tie, so the sequence is total and
-   * paging over it is stable.
-   */
-  findAll(page?: ProductPage): Promise<Product[]> {
-    return this.products.find({
-      order: { name: 'ASC', id: 'ASC' },
-      ...(page?.limit !== undefined ? { take: page.limit } : {}),
-      ...(page?.offset !== undefined ? { skip: page.offset } : {}),
-    });
+  // name ASC, id ASC: the id tiebreak keeps OFFSET/LIMIT stable when names collide.
+  async findAll(page?: ProductPage): Promise<Product[]> {
+    let query = this.products.find().sort({ name: 1, _id: 1 });
+    if (page?.offset !== undefined) {
+      query = query.skip(page.offset);
+    }
+    if (page?.limit !== undefined) {
+      query = query.limit(page.limit);
+    }
+    return query.exec();
   }
 
-  /** Rows in the catalog, ignoring any pagination — what a pager counts against. */
   count(): Promise<number> {
-    return this.products.count();
+    return this.products.countDocuments();
   }
 
-  async findOne(id: string): Promise<Product> {
-    const product = await this.products.findOne({ where: { id } });
+  async findOne(id: string): Promise<HydratedDocument<Product>> {
+    const product = await this.products.findById(id);
     if (!product) {
       throw new NotFoundException(`Product ${id} not found`);
     }
     return product;
   }
 
-  /** Creates a product. `name` and `price` are required; `stock` defaults to 0. */
   async create(dto: CreateProductDto): Promise<Product> {
-    const product = this.products.create({
+    const product = await this.products.create({
       name: normalizeName(dto?.name),
       price: normalizePrice(dto?.price),
       stock: normalizeStock(dto?.stock, 0),
     });
-
-    const saved = await this.products.save(product);
-    this.logger.log(`Created product ${saved.id} (${saved.name})`);
-    return saved;
+    this.logger.log(`Created product ${product._id} (${product.name})`);
+    return product;
   }
 
-  /**
-   * Partial update. Only the fields present on the dto are touched, so a stock
-   * adjustment from another flow cannot be clobbered by an edit that only
-   * meant to rename a product.
-   */
+  // Partial update: only fields present on the dto are touched.
   async update(id: string, dto: UpdateProductDto): Promise<Product> {
     const product = await this.findOne(id);
-
     if (dto?.name !== undefined) {
       product.name = normalizeName(dto.name);
     }
@@ -99,133 +80,121 @@ export class ProductsService {
     if (dto?.stock !== undefined) {
       product.stock = normalizeStock(dto.stock, product.stock);
     }
-
-    const saved = await this.products.save(product);
-    this.logger.log(`Updated product ${saved.id} (${saved.name})`);
+    const saved = await product.save();
+    this.logger.log(`Updated product ${saved._id} (${saved.name})`);
     return saved;
   }
 
-  /**
-   * Deletes a product. Reports a missing id as 404 rather than a silent no-op,
-   * so the admin UI can tell "deleted" apart from "was already gone".
-   */
   async remove(id: string): Promise<void> {
-    const result = await this.products.delete({ id });
-    if (!result.affected) {
+    const result = await this.products.deleteOne({ _id: id });
+    if (result.deletedCount === 0) {
       throw new NotFoundException(`Product ${id} not found`);
     }
     this.logger.log(`Deleted product ${id}`);
   }
 
-  /**
-   * Reserves stock for every line of an order, all-or-nothing.
-   *
-   * Runs in one transaction: either the whole order is taken out of stock or
-   * none of it is, so a partial reservation can never leave an order half
-   * fulfilled. "Not enough stock" is returned as data, not thrown — it is an
-   * expected business outcome the caller acts on, not an error.
-   *
-   * A repeat call with the same `eventId` returns the original outcome without
-   * touching stock, which is what makes at-least-once delivery safe.
-   */
+  // All-or-nothing reservation. Any failure aborts the transaction so every
+  // decrement is rolled back; a repeat eventId returns the original outcome
+  // without touching stock.
   async reserveStock(
     request: ReserveStockRequest,
   ): Promise<ReserveStockResponse> {
-    return this.dataSource.transaction(async (manager) => {
-      // Idempotency, checked inside the transaction so a concurrent duplicate
-      // cannot slip past a stale read.
-      const already = await manager.findOne(OrderPlacement, {
-        where: { eventId: request.eventId },
-      });
-      if (already) {
+    const session = await this.connection.startSession();
+    try {
+      return await session.withTransaction(async () => {
+        const already = await this.placements
+          .findOne({ eventId: request.eventId })
+          .session(session);
+        if (already) {
+          this.logger.log(
+            `Event ${request.eventId} already applied (order ${already.orderId}), skipping`,
+          );
+          return {
+            orderId: request.orderId,
+            ok: true,
+            lines: [],
+            failures: [],
+          };
+        }
+
+        const lines: ReserveStockLine[] = [];
+        const failures: ReserveStockFailure[] = [];
+
+        for (const item of request.items) {
+          const product = await this.products
+            .findById(item.productId)
+            .session(session);
+
+          if (!product) {
+            failures.push({
+              productId: item.productId,
+              requested: item.quantity,
+              available: 0,
+              reason: 'unknown-product',
+            });
+            continue;
+          }
+          if (product.stock < item.quantity) {
+            failures.push({
+              productId: item.productId,
+              requested: item.quantity,
+              available: product.stock,
+              reason: 'insufficient-stock',
+            });
+            continue;
+          }
+
+          await this.products
+            .updateOne(
+              { _id: product._id },
+              { $inc: { stock: -item.quantity } },
+            )
+            .session(session);
+          lines.push({
+            productId: product._id,
+            requested: item.quantity,
+            remaining: product.stock - item.quantity,
+          });
+        }
+
+        if (failures.length > 0) {
+          // Abort, do not just return: a normal return would commit the
+          // partial decrements.
+          await session.abortTransaction();
+          this.logger.warn(
+            `Reservation for order ${request.orderId} rejected: ${failures
+              .map((f) => `${f.productId} (${f.reason})`)
+              .join(', ')}`,
+          );
+          return { orderId: request.orderId, ok: false, lines: [], failures };
+        }
+
+        const unitsReserved = lines.reduce((sum, l) => sum + l.requested, 0);
+        await this.placements.create(
+          [
+            {
+              eventId: request.eventId,
+              orderId: request.orderId,
+              unitsReserved,
+            },
+          ],
+          { session },
+        );
+
         this.logger.log(
-          `Event ${request.eventId} already applied (order ${already.orderId}), skipping`,
+          `Reserved ${unitsReserved} units for order ${request.orderId}`,
         );
-        return {
-          orderId: request.orderId,
-          ok: true,
-          lines: [],
-          failures: [],
-        };
-      }
-
-      const lines: ReserveStockLine[] = [];
-      const failures: ReserveStockFailure[] = [];
-
-      for (const item of request.items) {
-        // FOR UPDATE serialises concurrent reservations of the same product,
-        // so two orders cannot both observe the last unit as available.
-        const product = await manager
-          .createQueryBuilder(Product, 'product')
-          .setLock('pessimistic_write')
-          .where('product.id = :id', { id: item.productId })
-          .getOne();
-
-        if (!product) {
-          failures.push({
-            productId: item.productId,
-            requested: item.quantity,
-            available: 0,
-            reason: 'unknown-product',
-          });
-          continue;
-        }
-
-        if (product.stock < item.quantity) {
-          failures.push({
-            productId: item.productId,
-            requested: item.quantity,
-            available: product.stock,
-            reason: 'insufficient-stock',
-          });
-          continue;
-        }
-
-        product.stock -= item.quantity;
-        await manager.save(Product, product);
-        lines.push({
-          productId: product.id,
-          requested: item.quantity,
-          remaining: product.stock,
-        });
-      }
-
-      // Any failure aborts the whole reservation: the transaction rolls back
-      // every decrement already applied above.
-      if (failures.length > 0) {
-        this.logger.warn(
-          `Reservation for order ${request.orderId} rejected: ${failures
-            .map((f) => `${f.productId} (${f.reason})`)
-            .join(', ')}`,
-        );
-        return { orderId: request.orderId, ok: false, lines: [], failures };
-      }
-
-      const unitsReserved = lines.reduce((sum, l) => sum + l.requested, 0);
-      await manager.save(
-        manager.create(OrderPlacement, {
-          eventId: request.eventId,
-          orderId: request.orderId,
-          unitsReserved,
-        }),
-      );
-
-      this.logger.log(
-        `Reserved ${unitsReserved} units for order ${request.orderId}`,
-      );
-      return { orderId: request.orderId, ok: true, lines, failures: [] };
-    });
+        return { orderId: request.orderId, ok: true, lines, failures: [] };
+      });
+    } finally {
+      await session.endSession();
+    }
   }
 
-  /**
-   * Seeds `count` demo products, unless the table already has rows.
-   *
-   * The fixed `PRODUCT_SEED` entries always come first (seeded orders reference
-   * their ids); the remainder are faker-generated. Runs once, on an empty table,
-   * so a restart does not multiply the catalog.
-   */
+  // Seeds demo products unless the collection already has documents. Runs once,
+  // on an empty collection, so a restart does not multiply the catalog.
   async seed(count: number): Promise<number> {
-    const existing = await this.products.count();
+    const existing = await this.products.countDocuments();
     if (existing > 0) {
       this.logger.log(`Products already present (${existing}), skipping seed`);
       return 0;
@@ -233,27 +202,21 @@ export class ProductsService {
 
     const fixed = PRODUCT_SEED;
     const fake = await generateFakeProducts(Math.max(count - fixed.length, 0));
-    const entities = [...fixed, ...fake].map((product) =>
-      this.products.create(product),
+    await this.products.insertMany(
+      [...fixed, ...fake].map((seed) => ({
+        _id: seed.id,
+        name: seed.name,
+        price: seed.price,
+        stock: seed.stock,
+      })),
     );
-
-    await this.products.save(entities);
+    const seeded = fixed.length + fake.length;
     this.logger.log(
-      `Seeded ${entities.length} products (${fixed.length} fixed, ${fake.length} faker)`,
+      `Seeded ${seeded} products (${fixed.length} fixed, ${fake.length} faker)`,
     );
-    return entities.length;
+    return seeded;
   }
 }
-
-/**
- * Write-side validation, kept as pure functions so both `create` and `update`
- * share one definition of "a valid name/price/stock" and the rules are
- * testable without a database.
- *
- * Each throws `BadRequestException` with the field name in the message: the
- * gateway forwards the status untouched, so whatever is thrown here is what
- * the admin UI shows the operator.
- */
 
 function normalizeName(value: unknown): string {
   if (typeof value !== 'string' || value.trim() === '') {
@@ -274,7 +237,6 @@ function normalizePrice(value: unknown): string {
   if (numeric > MAX_PRICE) {
     throw new BadRequestException(`price must not exceed ${MAX_PRICE}`);
   }
-  // Money is stored (and crosses the wire) as a decimal string, never a float.
   return numeric.toFixed(2);
 }
 

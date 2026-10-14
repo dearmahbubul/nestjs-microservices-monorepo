@@ -1,15 +1,8 @@
 import type { ProductSeed } from './product.seed.js';
 
-/**
- * Generates `count` random demo products.
- *
- * Ids are freshly generated per run, so a reseed against an empty table yields
- * a different catalog each time. Kept separate from the fixed `PRODUCT_SEED`
- * (whose ids seeded orders reference) so the two concerns stay distinct.
- *
- * `@faker-js/faker` is imported lazily: it is only needed on the seeding path,
- * and loading its locale bundles eagerly would slow every import of this module.
- */
+// Generates `count` random demo products. Ids are freshly generated per run,
+// so a reseed against an empty collection yields a different catalog. Faker
+// is imported lazily: it is only needed on the seeding path.
 export async function generateFakeProducts(
   count: number,
 ): Promise<ProductSeed[]> {

@@ -5,15 +5,11 @@ import { readSessionToken } from "./session";
 /**
  * Server-side access to the api-gateway.
  *
- * The browser never calls the gateway for anything authenticated. It calls this
- * app's own `/api/*` routes, which run on the server, read the httpOnly session
- * cookie and present it as a Bearer token. Two things fall out of that: no CORS
- * to configure (everything is same-origin in dev and behind nginx alike), and
- * the token is never exposed to client JavaScript.
- *
- * Note the public catalog does *not* go through here — it is read directly from
- * the browser (see `app/lib/api.ts`), because it needs no credential and a
- * server hop would only add a layer to debug.
+ * The browser never calls the gateway for anything authenticated: it calls this
+ * app's own `/api/*` routes, which read the httpOnly session cookie and present
+ * it as a Bearer token. No CORS to configure, and the token is never exposed to
+ * client JavaScript. The public catalog is read directly from the browser (see
+ * `app/lib/api.ts`).
  */
 
 const GATEWAY_URL = (

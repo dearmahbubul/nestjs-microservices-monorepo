@@ -2,23 +2,34 @@ import { NextResponse } from "next/server";
 import { gatewayFetchAsSession, toNextResponse } from "../../../lib/gateway";
 
 /**
- * `GET /api/orders` — the signed-in customer's own order history.
+ * `GET /api/storefront/orders` — the signed-in customer's own order history.
+ * `POST /api/storefront/orders` — places an order as the signed-in customer.
  *
- * Note what is *not* here: a `customerEmail` query parameter. This handler
- * deliberately forwards no filter at all. The gateway injects the email from
- * the verified token and deletes any the client sent (see
- * `applyIdentityScope` in the gateway's proxy service), so the scoping is
- * enforced at the one hop the client cannot reach around.
- *
- * Passing the email through from the request here would look harmless and would
- * hand the caller control of the filter; the gateway would strip it, but the
- * two would be relying on each other for correctness. One owner for the rule.
+ * Both go through this app's own handler so the session cookie becomes a
+ * Bearer token on the server hop: the gateway rewrites `customerEmail` from
+ * the verified token (see `applyIdentityScope`), so the order can only land
+ * in the caller's own history. The body is forwarded verbatim apart from that.
  */
 export async function GET(): Promise<Response> {
   const upstream = await gatewayFetchAsSession("/orders");
   if (!upstream) {
     return NextResponse.json(
       { message: "Sign in to see your orders." },
+      { status: 401 },
+    );
+  }
+  return toNextResponse(upstream);
+}
+
+export async function POST(request: Request): Promise<Response> {
+  const upstream = await gatewayFetchAsSession("/orders", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: await request.text(),
+  });
+  if (!upstream) {
+    return NextResponse.json(
+      { message: "Sign in to place an order." },
       { status: 401 },
     );
   }

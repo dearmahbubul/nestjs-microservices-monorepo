@@ -1,47 +1,23 @@
 /**
  * Browser-side client for the shop.
  *
- * Split by who carries the credential, which is not an arbitrary line:
+ * Split by who carries the credential:
+ * - The catalog is public: read straight from the browser via API_BASE (`/api`).
+ * - Everything authenticated goes through this app's own route handlers via
+ *   LOCAL_BASE (`/api/storefront` behind nginx, `/api` in dev) — see
+ *   `app/lib/gateway.ts` for why the token never reaches the browser.
  *
- * - The **catalog** is public. It is read straight from the browser here, with
- *   no session and no server hop in between.
- * - Everything **authenticated** (signing in, the session, order history) goes
- *   through this app's own route handlers instead — see `app/lib/gateway.ts`
- *   for why the token never reaches the browser.
- *
- * Those two live at different origins' worth of paths behind nginx, so they get
- * different bases:
- *
- * - `API_BASE` points at the **gateway**, which owns the public catalog. nginx
- *   only forwards `/api/products*` there, so the catalog reads `/products`
- *   while listing `/orders` would 404 — placing an order is authenticated and
- *   so goes through `LOCAL_BASE` below, like every other state-changing call.
- * - `LOCAL_BASE` points at **this app**, whose Route Handlers are mounted under
- *   `/api/storefront/*` (nginx routes that prefix here; the plain `/api/*` is
- *   reserved for the gateway, so the two never collide).
- *
- * For `next dev` there is no nginx: `NEXT_PUBLIC_API_URL` points at the gateway
- * port directly and the storefront's handlers are at `/api/*`, so `LOCAL_BASE`
- * can be empty. Set `NEXT_PUBLIC_APP_BASE` only if the app is served under a
- * sub-path.
- *
- * Money is a decimal *string* everywhere on the wire (`"129.99"`) — never a
- * float. Arithmetic happens in integer cents and is formatted back on the way
- * out, so `0.1 + 0.2` can never leak into a total.
+ * Money is a decimal string everywhere on the wire ("129.99") — never a float.
+ * Arithmetic happens in integer cents and is formatted back on the way out.
  */
 
 const API_BASE =
   (process.env.NEXT_PUBLIC_API_URL ?? "").replace(/\/+$/, "") || "/api";
 
-/**
- * Where this app's own Route Handlers live, as the browser sees them.
- *
- * The default is derived rather than hard-coded because the two environments
- * genuinely differ: with Next running behind nginx (`NEXT_PUBLIC_API_URL` set,
- * so there *is* a split) the handlers sit under `/api/storefront`; with no
- * nginx (dev, where `NEXT_PUBLIC_API_URL` is empty) they really are at `/api`.
- * An explicit `NEXT_PUBLIC_APP_BASE` always wins, for a sub-path deployment.
- */
+// Where this app's own Route Handlers live, as the browser sees them.
+// Derived because the environments differ: with nginx they sit under
+// `/api/storefront`; with no nginx (dev) they really are at `/api`. An
+// explicit NEXT_PUBLIC_APP_BASE always wins.
 const LOCAL_BASE = (
   process.env.NEXT_PUBLIC_APP_BASE ??
   (process.env.NEXT_PUBLIC_API_URL ? "/api/storefront" : "/api")
@@ -86,6 +62,23 @@ export interface Order {
   items: OrderItem[];
   createdAt: string;
 }
+
+/** One line of the saved cart. */
+export interface CartItem {
+  productId: string;
+  quantity: number;
+}
+
+/** The saved cart, as returned by cart-service. */
+export interface Cart {
+  customerEmail: string;
+  items: CartItem[];
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/** Local (signed-out) cart: productId -> quantity. */
+export type LocalCart = Record<string, number>;
 
 export class ApiError extends Error {
   readonly status: number;
@@ -186,17 +179,17 @@ export async function countProducts(signal?: AbortSignal): Promise<number> {
 /**
  * Places an order for the signed-in customer.
  *
- * `items` only — the email is deliberately absent. A browser-held email is an
- * assertion, and this endpoint is reachable by anyone: posting a stranger's
- * address would place an order in that stranger's history. The gateway replaces
- * `customerEmail` with the one in the session token (see `applyIdentityScope`),
- * so the address is a fact of the session rather than of the request body.
+ * `items` only — the email is deliberately absent, and the call goes through
+ * this app's own route handler so the session cookie becomes a Bearer token
+ * server-side. The gateway replaces `customerEmail` with the one in the
+ * session token (see `applyIdentityScope`), so the address is a fact of the
+ * session rather than of the request body.
  */
 export function createOrder(
   input: { items: OrderItemInput[] },
   signal?: AbortSignal,
 ): Promise<Order> {
-  return request<Order>("/orders", {
+  return localRequest<Order>("/orders", {
     method: "POST",
     body: JSON.stringify(input),
     signal,
@@ -235,6 +228,9 @@ export function register(email: string, password: string): Promise<AuthUser> {
 }
 
 export async function logout(): Promise<void> {
+  // The saved cart belongs to the account; the local one is dropped so the
+  // next sign-in does not inherit it.
+  clearLocalCart();
   await fetch(`${LOCAL_BASE}/auth/logout`, { method: "POST" });
 }
 
@@ -247,6 +243,86 @@ export async function logout(): Promise<void> {
  */
 export function listMyOrders(): Promise<Order[]> {
   return localRequest<Order[]>("/orders");
+}
+
+// ------------------------------------------------------- saved cart
+
+const GUEST_CART_KEY = "guest-cart";
+
+function readLocalCart(): LocalCart {
+  try {
+    const raw = window.localStorage.getItem(GUEST_CART_KEY);
+    const parsed = raw ? (JSON.parse(raw) as unknown) : null;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    const cart: LocalCart = {};
+    for (const [productId, quantity] of Object.entries(parsed)) {
+      if (typeof quantity === "number" && quantity > 0) {
+        cart[productId] = quantity;
+      }
+    }
+    return cart;
+  } catch {
+    return {};
+  }
+}
+
+function writeLocalCart(cart: LocalCart): void {
+  try {
+    if (Object.keys(cart).length === 0) {
+      window.localStorage.removeItem(GUEST_CART_KEY);
+    } else {
+      window.localStorage.setItem(GUEST_CART_KEY, JSON.stringify(cart));
+    }
+  } catch {
+    /* storage unavailable — the cart stays in memory only */
+  }
+}
+
+function clearLocalCart(): void {
+  try {
+    window.localStorage.removeItem(GUEST_CART_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function getLocalCart(): LocalCart {
+  return readLocalCart();
+}
+
+export function saveLocalCart(cart: LocalCart): void {
+  writeLocalCart(cart);
+}
+
+export function forgetLocalCart(): void {
+  clearLocalCart();
+}
+
+/** The saved cart. Signed-out callers use local storage instead. */
+export function getCart(): Promise<Cart> {
+  return localRequest<Cart>("/cart");
+}
+
+/** Sets a line's quantity; 0 removes it. */
+export function setCartItem(productId: string, quantity: number): Promise<Cart> {
+  return localRequest<Cart>(`/cart/items/${encodeURIComponent(productId)}`, {
+    method: "PUT",
+    body: JSON.stringify({ quantity }),
+  });
+}
+
+/** Removes a line. */
+export function removeCartItem(productId: string): Promise<Cart> {
+  return localRequest<Cart>(`/cart/items/${encodeURIComponent(productId)}`, {
+    method: "DELETE",
+  });
+}
+
+/** Empties the saved cart. */
+export function clearCart(): Promise<Cart> {
+  return localRequest<Cart>("/cart", { method: "DELETE" });
 }
 
 /** True when the failure was "your session is gone" rather than anything else. */

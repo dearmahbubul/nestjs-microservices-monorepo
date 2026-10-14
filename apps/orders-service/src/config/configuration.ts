@@ -13,11 +13,6 @@ export interface AppConfig {
     url: string;
     synchronize: boolean;
   };
-  /**
-   * Event-bus config. Publishes through the shared exchange so every
-   * subscriber's own queue receives a copy — a plain queue would deliver to
-   * one consumer only.
-   */
   messaging: MessagingConfig;
   seed: boolean;
 }
@@ -31,13 +26,13 @@ export default function loadConfiguration(): AppConfig {
       port: toInt('PORT', 3000),
     },
     database: {
-      url: process.env.DATABASE_URL ?? 'postgresql://app:app@localhost:5432/app',
+      url: process.env.DATABASE_URL ?? 'postgresql://app:app@localhost:5432/orders',
       // Tables are created with synchronize outside production. There are no
       // migrations, so a production stack must opt in explicitly (the demo
       // compose stack sets DATABASE_SYNCHRONIZE=true) or no tables are created.
       synchronize: toBool('DATABASE_SYNCHRONIZE', env !== 'production'),
     },
-    // Event connection: publishes order.created onto the shared exchange.
+    // Publishes order.created onto the shared exchange.
     messaging: messagingConfiguration({
       exchange: 'orders.events',
       queue: 'orders.events',

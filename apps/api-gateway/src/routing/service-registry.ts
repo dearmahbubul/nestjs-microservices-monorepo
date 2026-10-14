@@ -7,17 +7,11 @@ export const SERVICE_NAMES = [
   'identity',
   'orders',
   'notifications',
+  'cart',
 ] as const;
 
 export type ServiceName = (typeof SERVICE_NAMES)[number];
 
-/**
- * Public route prefix -> downstream service.
- *
- * A single mapping table beats one controller per service: adding a service is
- * one line here plus its URL in the environment, and the routing logic itself
- * never changes. Keep prefixes disjoint — first match wins.
- */
 export const ROUTE_TO_SERVICE: ReadonlyArray<{
   prefix: string;
   service: ServiceName;
@@ -27,6 +21,7 @@ export const ROUTE_TO_SERVICE: ReadonlyArray<{
   { prefix: 'users', service: 'identity' },
   { prefix: 'orders', service: 'orders' },
   { prefix: 'notifications', service: 'notifications' },
+  { prefix: 'cart', service: 'cart' },
 ];
 
 export function resolveServiceForPath(path: string): ServiceName | undefined {

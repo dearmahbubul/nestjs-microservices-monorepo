@@ -7,28 +7,16 @@ import { MessagingService } from '@repo/messaging';
 import { randomUUID } from 'node:crypto';
 import type { Order } from '../database/order.entity.js';
 
-/**
- * Publishes the order domain events other services react to.
- *
- * Kept separate from `OrdersService` so the web/messaging controllers can
- * trigger a publish without coupling the persistence layer to the transport —
- * moving from RabbitMQ to another broker is a change to this file only.
- */
+// Publishes the order domain events other services react to. Kept separate
+// from OrdersService so persistence does not depend on the transport.
 @Injectable()
 export class OrderEventsPublisher {
   private readonly logger = new Logger(OrderEventsPublisher.name);
 
   constructor(private readonly messaging: MessagingService) {}
 
-  /**
-   * Announces a freshly persisted order.
-   *
-   * This never throws. The order is already committed by the time we get here,
-   * and a broker outage must not turn a successful checkout into a 500 — the
-   * customer's order exists and the response should say so. A failed publish
-   * is logged loudly instead; the durable-queue/outbox follow-up is tracked
-   * separately.
-   */
+  // Never throws: the order is already committed, and a broker outage must not
+  // turn a successful checkout into a 500. A failed publish is logged loudly.
   announceCreated(order: Order): void {
     const event: OrderCreatedEvent = {
       eventId: randomUUID(),

@@ -1,13 +1,20 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  clearCart,
   createOrder,
   fetchSession,
+  forgetLocalCart,
   formatCents,
+  getCart,
+  getLocalCart,
+  saveLocalCart,
+  setCartItem,
   toCents,
   type AuthUser,
+  type LocalCart,
   type Order,
   type Product,
 } from "../lib/api";
@@ -15,27 +22,34 @@ import { useCatalog } from "../lib/use-catalog";
 import { useInView } from "../lib/use-in-view";
 
 /** productId -> quantity. A missing key means "not in the cart". */
-type Cart = Record<string, number>;
+type Cart = LocalCart;
+
+function toCart(items: { productId: string; quantity: number }[]): Cart {
+  return Object.fromEntries(items.map((i) => [i.productId, i.quantity]));
+}
 
 export default function Storefront() {
   const catalog = useCatalog();
   const { products, total, loading, done, error, loadMore, reload, generation } =
     catalog;
 
-  const [cart, setCart] = useState<Cart>({});
+  const [cart, setCart] = useState<Cart>(() => getLocalCart());
   const [user, setUser] = useState<AuthUser | null>(null);
   const [sessionChecked, setSessionChecked] = useState(false);
   const [placing, setPlacing] = useState(false);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [order, setOrder] = useState<Order | null>(null);
 
+  // Guest writes go to localStorage; the server cart replaces them once the
+  // session resolves (see the merge effect below).
+  const cartRef = useRef(cart);
+  cartRef.current = cart;
+  const merged = useRef(false);
+
   /**
-   * Checkout needs an identity, and the only trustworthy one is the session.
-   *
-   * `null` here means "signed out", which is the ordinary case for a shop — a
-   * catalogue does not require an account. It is recorded separately from the
-   * fetch having settled so the cart does not flash "please sign in" during the
-   * first render, before the session answer has arrived.
+   * Resolves the session, then makes the server cart the source of truth:
+   * any lines added while signed out are merged in (the larger quantity wins)
+   * and the local copy is dropped.
    */
   useEffect(() => {
     let cancelled = false;
@@ -58,6 +72,41 @@ export default function Storefront() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!user || merged.current) {
+      return;
+    }
+    merged.current = true;
+
+    const guest = getLocalCart();
+    if (Object.keys(guest).length === 0) {
+      void getCart()
+        .then((server) => setCart(toCart(server.items)))
+        .catch(() => {
+          /* keep the in-memory cart */
+        });
+      return;
+    }
+
+    void (async () => {
+      try {
+        let server = await getCart();
+        const known = new Map(
+          server.items.map((item) => [item.productId, item.quantity]),
+        );
+        for (const [productId, quantity] of Object.entries(guest)) {
+          if (quantity > (known.get(productId) ?? 0)) {
+            server = await setCartItem(productId, quantity);
+          }
+        }
+        forgetLocalCart();
+        setCart(toCart(server.items));
+      } catch {
+        /* server cart unreachable — keep the local lines in memory */
+      }
+    })();
+  }, [user]);
 
   /**
    * The autoload trigger.
@@ -94,24 +143,45 @@ export default function Storefront() {
 
   function addToCart(product: Product) {
     setOrder(null);
-    setCart((prev) => ({
-      ...prev,
-      // Never let the cart exceed what is on the shelf.
-      [product.id]: Math.min((prev[product.id] ?? 0) + 1, product.stock),
-    }));
+    // Never let the cart exceed what is on the shelf.
+    applyQuantity(product.id, Math.min((cart[product.id] ?? 0) + 1, product.stock));
   }
 
   function setQuantity(product: Product, quantity: number) {
     setOrder(null);
+    applyQuantity(product.id, Math.max(0, Math.min(quantity, product.stock)));
+  }
+
+  function applyQuantity(productId: string, quantity: number) {
     setCart((prev) => {
-      const clamped = Math.max(0, Math.min(quantity, product.stock));
       const next = { ...prev };
-      if (clamped === 0) {
-        delete next[product.id];
+      if (quantity === 0) {
+        delete next[productId];
       } else {
-        next[product.id] = clamped;
+        next[productId] = quantity;
       }
       return next;
+    });
+    persist(productId, quantity);
+  }
+
+  // Signed-in: the server cart is the copy that survives a reload. Signed-out:
+  // localStorage, so a refresh does not lose the selection (and a sign-in can
+  // merge it, see the effect above). A failed sync leaves the local state in
+  // place — the cart still works, it just is not saved yet.
+  function persist(productId: string, quantity: number) {
+    if (!user) {
+      const next = { ...cartRef.current };
+      if (quantity === 0) {
+        delete next[productId];
+      } else {
+        next[productId] = quantity;
+      }
+      saveLocalCart(next);
+      return;
+    }
+    void setCartItem(productId, quantity).catch(() => {
+      /* local state already updated */
     });
   }
 
@@ -147,6 +217,15 @@ export default function Storefront() {
       });
       setOrder(created);
       setCart({});
+      if (user) {
+        // The saved cart is emptied server-side too, otherwise a reload
+        // would refill the cart with what was just ordered.
+        void clearCart().catch(() => {
+          /* local state already cleared */
+        });
+      } else {
+        saveLocalCart({});
+      }
       // Stock is reserved asynchronously by catalog-service off the
       // `order.created` event, so re-read the catalog after a beat. A full
       // reload rather than a patched list: the reservation is all-or-nothing

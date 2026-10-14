@@ -22,11 +22,7 @@ export class AuthController {
     return this.auth.login(dto?.email, dto?.password);
   }
 
-  /**
-   * Public signup for shop customers, and the only way a non-admin account
-   * comes into existence. Returns the same shape as `login`, so a client can
-   * treat "signed up" and "signed in" as one state transition.
-   */
+  /** Public signup for shop customers. Same shape as `login`. */
   @Post('register')
   @HttpCode(201)
   register(@Body() dto: RegisterDto) {

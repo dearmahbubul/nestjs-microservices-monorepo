@@ -9,10 +9,6 @@ export interface AppConfig {
     env: string;
     port: number;
   };
-  /**
-   * Event-bus config. Binds this service's own queue to the shared exchange,
-   * so it receives every `order.created`.
-   */
   messaging: MessagingConfig;
 }
 
@@ -24,6 +20,7 @@ export default function loadConfiguration(): AppConfig {
       env,
       port: toInt('PORT', 3000),
     },
+    // Binds this service's own queue to the shared exchange.
     messaging: messagingConfiguration({
       exchange: 'orders.events',
       queue: 'notifications.order-events',

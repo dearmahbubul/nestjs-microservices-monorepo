@@ -1,25 +1,23 @@
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { TypeOrmModule } from '@nestjs/typeorm';
-import { Product } from './product.entity.js';
+import { MongooseModule } from '@nestjs/mongoose';
+import { Product, ProductSchema } from './product.schema.js';
+import { OrderPlacement, OrderPlacementSchema } from './order-placement.schema.js';
 import type { AppConfig } from '../config/configuration.js';
 
 @Module({
   imports: [
-    TypeOrmModule.forRootAsync({
+    MongooseModule.forRootAsync({
       inject: [ConfigService],
-      useFactory: (config: ConfigService) => {
-        const database = config.getOrThrow<AppConfig['database']>('database');
-        return {
-          type: 'postgres',
-          url: database.url,
-          synchronize: database.synchronize,
-          autoLoadEntities: true,
-        };
-      },
+      useFactory: (config: ConfigService) => ({
+        uri: config.getOrThrow<AppConfig['database']>('database').url,
+      }),
     }),
-    TypeOrmModule.forFeature([Product]),
+    MongooseModule.forFeature([
+      { name: Product.name, schema: ProductSchema },
+      { name: OrderPlacement.name, schema: OrderPlacementSchema },
+    ]),
   ],
-  exports: [TypeOrmModule],
+  exports: [MongooseModule],
 })
 export class DatabaseModule {}
